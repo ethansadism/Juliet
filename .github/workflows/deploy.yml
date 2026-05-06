@@ -21,11 +21,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -33,6 +33,9 @@ jobs:
       - name: Fetch Google Sheet
         env:
           SHEET_ID: ${{ vars.SHEET_ID || '1usFOv65YmnxXbilHyBFTkmmKrgP_e4opfqk3vUviUOg' }}
+          # Optional manual override if auto-discovery misses tabs.
+          # Format: "gid1,gid2,gid3"  or  "gid1:Name1,gid2:Name2"
+          SHEET_GIDS: ${{ vars.SHEET_GIDS }}
         run: npm run fetch:sheet
 
       - name: Build

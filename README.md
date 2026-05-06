@@ -27,7 +27,11 @@ npm run dev             # http://localhost:5173
 1. 將此 repo 推到 GitHub。
 2. Repository → **Settings → Pages → Build and deployment → Source = GitHub Actions**。
 3. (可選)Settings → Secrets and variables → Actions
-   - **Variables**: `SHEET_ID` = 您的 Google Sheet ID(預設已內建現用的)
+   - **Variables**:
+     - `SHEET_ID` = 您的 Google Sheet ID(預設已內建現用的)
+     - `SHEET_GIDS` = 手動指定工作表 gid,只有在自動探勘失敗時才需要設。
+       格式 `gid1,gid2,gid3` 或附名稱 `0:題庫A,123:題庫B,456:題庫C`。
+       gid 可以從 sheet URL 列點開該分頁時的 `#gid=NNN` 找到。
    - **Secrets**: `SYNC_URL` = Apps Script 部署後的 web app URL(若要跨裝置同步)
 4. push 到 `main` 後 Action 會自動 build + deploy,並每天 01:00 (Taipei)
    重新拉一次題庫。

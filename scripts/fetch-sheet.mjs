@@ -9,32 +9,106 @@ import { dirname } from 'node:path'
 
 const SHEET_ID = process.env.SHEET_ID ?? '1usFOv65YmnxXbilHyBFTkmmKrgP_e4opfqk3vUviUOg'
 
-// The first tab is always gid=0. Other tabs we discover by scraping the
-// spreadsheet's HTML page (works for "anyone with link" sheets without an API key).
-async function discoverGids(sheetId) {
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`
-  const res = await fetch(url, { redirect: 'follow' })
-  if (!res.ok) throw new Error(`Failed to load sheet HTML: ${res.status}`)
-  const html = await res.text()
+// Some Google endpoints return 400 for bare/empty User-Agents (common on CI runners).
+const FETCH_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+  Accept: 'text/html,application/xhtml+xml,text/csv,*/*;q=0.8',
+  'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+}
 
-  // Each sheet appears in the bootstrap blob as {"name":"...","gid":NNN,...}
-  // We extract unique pairs preserving order.
-  const seen = new Set()
-  const sheets = []
-  const re = /\{"name":"([^"\\]*(?:\\.[^"\\]*)*)","label":"[^"]*","sheetType":[^,]+,"gid":(\d+)/g
-  let m
-  while ((m = re.exec(html))) {
-    const name = m[1].replace(/\\u([0-9a-fA-F]{4})/g, (_, h) =>
-      String.fromCharCode(parseInt(h, 16)),
-    )
-    const gid = m[2]
-    if (seen.has(gid)) continue
-    seen.add(gid)
-    sheets.push({ name, gid })
+// Manual override: SHEET_GIDS="0,123456,789" (optionally "gid:Name,gid:Name,...")
+function parseGidOverride(spec) {
+  if (!spec) return null
+  const out = []
+  for (const part of spec.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const [g, n] = part.split(':')
+    if (!/^\d+$/.test(g)) continue
+    out.push({ gid: g, name: (n || `Sheet ${out.length + 1}`).trim() })
   }
+  return out.length ? out : null
+}
+
+function decodeUnicode(s) {
+  return (s || '').replace(/\\u([0-9a-fA-F]{4})/g, (_, h) =>
+    String.fromCharCode(parseInt(h, 16)),
+  )
+}
+
+async function fetchHtml(sheetId) {
+  // Try several public-friendly endpoints in order. /htmlview works for
+  // "anyone with link can view" sheets without redirecting to login.
+  const candidates = [
+    `https://docs.google.com/spreadsheets/d/${sheetId}/htmlview`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/preview`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/edit`,
+  ]
+  let lastStatus = 0
+  for (const url of candidates) {
+    const res = await fetch(url, { redirect: 'follow', headers: FETCH_HEADERS })
+    lastStatus = res.status
+    if (res.ok) {
+      const html = await res.text()
+      return { url, html }
+    }
+    console.warn(`  ${url} -> ${res.status}`)
+  }
+  throw new Error(
+    `Failed to load sheet HTML (last status ${lastStatus}). ` +
+      `Make sure the sheet is "Anyone with the link can view".`,
+  )
+}
+
+async function discoverGids(sheetId) {
+  const override = parseGidOverride(process.env.SHEET_GIDS)
+  if (override) {
+    console.log(`Using SHEET_GIDS override: ${override.map((s) => s.gid).join(',')}`)
+    return override
+  }
+
+  const { url, html } = await fetchHtml(sheetId)
+  console.log(`Loaded HTML from ${url} (${html.length} bytes)`)
+
+  // Try several patterns. Google rotates the bootstrap shape, so be lenient.
+  const namesByGid = new Map()
+  const namePatterns = [
+    /\{"name":"([^"\\]*(?:\\.[^"\\]*)*)","label":"[^"]*","sheetType":[^,]+,"gid":(\d+)/g,
+    /"name":"([^"\\]*(?:\\.[^"\\]*)*)"[^{}]{0,200}?"gid":(\d+)/g,
+    /"title":"([^"\\]*(?:\\.[^"\\]*)*)"[^{}]{0,200}?"sheetId":(\d+)/g,
+    // /htmlview tab labels: <li id="sheet-button-NNN"><a ... >Name</a></li>
+    /id="sheet-button-(\d+)"[^>]*>\s*<a[^>]*>\s*([^<]+?)\s*<\/a>/g,
+  ]
+  for (const re of namePatterns) {
+    let m
+    while ((m = re.exec(html))) {
+      // The id="sheet-button-..." pattern has gid first; others have name first.
+      const isIdFirst = re.source.startsWith('id="sheet-button-')
+      const gid = isIdFirst ? m[1] : m[2]
+      const name = isIdFirst ? m[2] : m[1]
+      if (!namesByGid.has(gid)) namesByGid.set(gid, decodeUnicode(name))
+    }
+  }
+
+  // Also collect any gid that appears as a query string anywhere — helps
+  // when name patterns miss but tab links exist.
+  const allGids = new Set(namesByGid.keys())
+  const looseRe = /[?&#]gid=(\d+)|"gid":(\d+)|"sheetId":(\d+)/g
+  let m
+  while ((m = looseRe.exec(html))) {
+    const gid = m[1] || m[2] || m[3]
+    if (gid) allGids.add(gid)
+  }
+
+  const sheets = [...allGids].map((gid, i) => ({
+    name: namesByGid.get(gid) ?? `Sheet ${i + 1}`,
+    gid,
+  }))
+
   if (sheets.length === 0) {
-    // Fallback: just use gid=0
-    sheets.push({ name: 'Sheet1', gid: '0' })
+    throw new Error(
+      'Could not discover any worksheet gids. Set SHEET_GIDS="gid1,gid2,..." ' +
+        'env var to override (find each gid in the URL bar when you click the tab).',
+    )
   }
   return sheets
 }
@@ -83,12 +157,6 @@ function parseCsv(text) {
   return rows
 }
 
-async function fetchSheetCsv(sheetId, gid) {
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`
-  const res = await fetch(url, { redirect: 'follow' })
-  if (!res.ok) throw new Error(`Failed to fetch gid=${gid}: ${res.status}`)
-  return res.text()
-}
 
 function looksLikeHeader(row) {
   if (row.length < 2) return false
@@ -97,16 +165,49 @@ function looksLikeHeader(row) {
   return /題|question|q\b/.test(a) && /答|answer|a\b/.test(b)
 }
 
+async function fetchSheetCsv(sheetId, gid) {
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`
+  const res = await fetch(url, { redirect: 'follow', headers: FETCH_HEADERS })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`gid=${gid} HTTP ${res.status} ${body.slice(0, 120)}`)
+  }
+  return res.text()
+}
+
 async function main() {
   console.log(`Fetching sheet ${SHEET_ID}...`)
-  const sheets = await discoverGids(SHEET_ID)
-  console.log(`Discovered ${sheets.length} worksheet(s):`, sheets)
+  const candidates = await discoverGids(SHEET_ID)
+  console.log(`Candidate worksheet(s): ${candidates.length}`)
+  for (const s of candidates) console.log(`  - gid=${s.gid} name="${s.name}"`)
+
+  // Validate each candidate by attempting to fetch it; skip ones that 400
+  // (deleted tabs, hidden internal sheets) or come back empty.
+  const sheets = []
+  for (const s of candidates) {
+    try {
+      const csv = await fetchSheetCsv(SHEET_ID, s.gid)
+      if (csv && csv.replace(/\s+/g, '').length > 0) {
+        sheets.push({ ...s, csv })
+      } else {
+        console.log(`  skip gid=${s.gid}: empty`)
+      }
+    } catch (err) {
+      console.log(`  skip gid=${s.gid}: ${err.message}`)
+    }
+  }
+  if (!sheets.length) {
+    throw new Error(
+      'No worksheet was fetchable. Confirm "Anyone with the link can view" ' +
+        'is set, or set SHEET_GIDS="gid1,gid2,..." manually.',
+    )
+  }
+  console.log(`Using ${sheets.length} worksheet(s)`)
 
   const questions = []
   let serial = 0
   for (const sheet of sheets) {
-    const csv = await fetchSheetCsv(SHEET_ID, sheet.gid)
-    const rows = parseCsv(csv)
+    const rows = parseCsv(sheet.csv)
     let started = false
     for (const row of rows) {
       const a = (row[0] ?? '').trim()
