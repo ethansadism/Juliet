@@ -59,7 +59,7 @@ async function submit() {
 <template>
   <div>
     <div class="topbar">
-      <h1>Juliet 模擬考</h1>
+      <h1>月月 模擬考</h1>
     </div>
     <div class="card">
       <h2>登入</h2>
