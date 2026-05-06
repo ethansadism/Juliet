@@ -3,7 +3,6 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth.js'
 import { useProgressStore } from '../stores/progress.js'
-import { pullSnapshot, syncEnabled } from '../lib/sync.js'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -23,24 +22,8 @@ async function submit() {
   busy.value = true
   try {
     await auth.login(username.value.trim(), password.value)
-    if (syncEnabled()) {
-      try {
-        const remote = await pullSnapshot(auth.user.username)
-        if (remote) {
-          const localRaw = localStorage.getItem(`juliet:progress:${auth.user.username}`)
-          const localTs = localRaw ? JSON.parse(localRaw).lastActivityAt : null
-          if (!localTs || (remote.lastActivityAt && remote.lastActivityAt > localTs)) {
-            localStorage.setItem(
-              `juliet:progress:${auth.user.username}`,
-              JSON.stringify(remote),
-            )
-          }
-        }
-      } catch {
-        // offline ok — local data still works
-      }
-    }
     progress.hydrate()
+    await progress.pullAndMerge()
     router.replace({ name: 'home' })
   } catch (err) {
     if (err.code === 'invalid credentials') {

@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { isCorrect } from '../lib/parseQuestion.js'
 import { useAuthStore } from './auth.js'
-import { syncEnabled, syncProgress, pullSnapshot } from '../lib/sync.js'
+import { syncEnabled, syncProgress, pushExam, pullAll } from '../lib/sync.js'
 
-const VERSION = 1
+const VERSION = 2
 
 const defaultSettings = () => ({
   questionsPerExam: 250,
@@ -14,13 +14,13 @@ const defaultSettings = () => ({
 const emptyState = () => ({
   version: VERSION,
   settings: defaultSettings(),
-  // qid -> { timesAnswered, timesCorrect, timesWrong, lastWrong, knownByUser, lastAnsweredAt }
-  questionStats: {},
-  // ordered exam history
-  exams: [],
-  // active (unfinished) exam, or null
+  knownIds: [], // qids the user marked "我會了"
+  exams: [], // local cache of finished exams; cloud lives in _exams sheet
   activeExam: null,
   lastActivityAt: null,
+  // questionStats is a derived cache (not persisted to cloud).
+  // Recomputed from `exams` on hydrate / pullAndMerge / submit.
+  questionStats: {},
 })
 
 function storageKey(username) {
@@ -42,9 +42,6 @@ function pickRandom(pool, n) {
   return shuffle(pool).slice(0, n)
 }
 
-// Stratified pick: prefer questions seen the fewest times. This way, until
-// every question has been answered at least once, no never-seen question is
-// passed over in favour of a repeat.
 function pickByLeastSeen(ids, stats, n) {
   if (n <= 0) return []
   const buckets = new Map()
@@ -62,51 +59,115 @@ function pickByLeastSeen(ids, stats, n) {
   return out
 }
 
-function ensureStat(stats, qid) {
-  if (!stats[qid]) {
-    stats[qid] = {
-      timesAnswered: 0,
-      timesCorrect: 0,
-      timesWrong: 0,
-      lastWrong: false,
-      knownByUser: false,
-      lastAnsweredAt: null,
+// Rebuild per-question counters from the immutable exam history.
+function deriveStats(exams) {
+  const stats = {}
+  for (const ex of exams) {
+    if (!ex || !ex.finishedAt) continue
+    for (const [qid, a] of Object.entries(ex.answers || {})) {
+      if (!stats[qid]) {
+        stats[qid] = {
+          timesAnswered: 0,
+          timesCorrect: 0,
+          timesWrong: 0,
+          lastWrong: false,
+          lastAnsweredAt: null,
+        }
+      }
+      const s = stats[qid]
+      s.timesAnswered++
+      if (a.correct) {
+        s.timesCorrect++
+        s.lastWrong = false
+      } else {
+        s.timesWrong++
+        s.lastWrong = true
+      }
+      if (!s.lastAnsweredAt || (a.ts && a.ts > s.lastAnsweredAt)) {
+        s.lastAnsweredAt = a.ts || null
+      }
     }
   }
-  return stats[qid]
+  return stats
+}
+
+function migrateLocalV1(data) {
+  // v1 had questionStats[qid].knownByUser; flatten into a knownIds list.
+  if (data.version === VERSION) return data
+  const knownIds = Array.isArray(data.knownIds) ? data.knownIds.slice() : []
+  if (data.questionStats) {
+    for (const [qid, s] of Object.entries(data.questionStats)) {
+      if (s && s.knownByUser && !knownIds.includes(qid)) knownIds.push(qid)
+    }
+  }
+  return { ...data, version: VERSION, knownIds }
+}
+
+function unionExamsById(localExams, remoteExams) {
+  const byId = new Map()
+  for (const e of localExams) if (e && e.id) byId.set(e.id, e)
+  for (const re of remoteExams || []) {
+    if (!re || !re.id) continue
+    const local = byId.get(re.id)
+    if (!local) {
+      byId.set(re.id, re)
+      continue
+    }
+    // Prefer the one with finishedAt set, or the later one.
+    const winner =
+      re.finishedAt && (!local.finishedAt || re.finishedAt > local.finishedAt)
+        ? re
+        : local
+    byId.set(re.id, winner)
+  }
+  return [...byId.values()].sort((a, b) =>
+    (a.startedAt || '') < (b.startedAt || '') ? -1 : 1,
+  )
 }
 
 export const useProgressStore = defineStore('progress', {
   state: () => emptyState(),
   getters: {
     answeredQuestionCount(state) {
-      return Object.values(state.questionStats).filter((s) => s.timesAnswered > 0).length
+      return Object.values(state.questionStats).filter((s) => s.timesAnswered > 0)
+        .length
     },
     totalAttempts(state) {
-      return Object.values(state.questionStats).reduce((sum, s) => sum + s.timesAnswered, 0)
+      return Object.values(state.questionStats).reduce(
+        (sum, s) => sum + s.timesAnswered,
+        0,
+      )
     },
     totalCorrect(state) {
-      return Object.values(state.questionStats).reduce((sum, s) => sum + s.timesCorrect, 0)
+      return Object.values(state.questionStats).reduce(
+        (sum, s) => sum + s.timesCorrect,
+        0,
+      )
     },
     correctRate(state) {
-      const a = Object.values(state.questionStats).reduce((sum, s) => sum + s.timesAnswered, 0)
-      const c = Object.values(state.questionStats).reduce((sum, s) => sum + s.timesCorrect, 0)
+      const a = Object.values(state.questionStats).reduce(
+        (sum, s) => sum + s.timesAnswered,
+        0,
+      )
+      const c = Object.values(state.questionStats).reduce(
+        (sum, s) => sum + s.timesCorrect,
+        0,
+      )
       return a === 0 ? 0 : c / a
     },
+    knownSet(state) {
+      return new Set(state.knownIds)
+    },
     wrongQuestionIds(state) {
-      // currently-wrong = at least one wrong attempt and not marked known by user
+      const known = new Set(state.knownIds)
       const out = []
       for (const [qid, s] of Object.entries(state.questionStats)) {
-        if (s.timesWrong > 0 && !s.knownByUser) out.push(qid)
+        if (s.timesWrong > 0 && !known.has(qid)) out.push(qid)
       }
       return out
     },
     knownQuestionIds(state) {
-      const out = []
-      for (const [qid, s] of Object.entries(state.questionStats)) {
-        if (s.knownByUser) out.push(qid)
-      }
-      return out
+      return state.knownIds.slice()
     },
     avgSecondsPer100(state) {
       let totalSeconds = 0
@@ -124,24 +185,30 @@ export const useProgressStore = defineStore('progress', {
     },
   },
   actions: {
-    _persist() {
-      const auth = useAuthStore()
-      if (!auth.user) return
-      const snapshot = {
-        version: this.version,
+    _snapshot() {
+      // What we push to the cloud _progress cell — no exams, no derived stats.
+      return {
+        version: VERSION,
         settings: this.settings,
-        questionStats: this.questionStats,
-        exams: this.exams,
+        knownIds: this.knownIds,
         activeExam: this.activeExam,
         lastActivityAt: this.lastActivityAt,
       }
+    },
+    _persist() {
+      const auth = useAuthStore()
+      if (!auth.user) return
+      // Local copy includes exams + cached stats so reload works offline.
+      const fullLocal = {
+        ...this._snapshot(),
+        exams: this.exams,
+      }
       try {
-        localStorage.setItem(storageKey(auth.user.username), JSON.stringify(snapshot))
+        localStorage.setItem(storageKey(auth.user.username), JSON.stringify(fullLocal))
       } catch (err) {
         console.warn('localStorage write failed', err)
       }
-      // best-effort cloud sync
-      syncProgress(auth.user.username, snapshot).catch((err) =>
+      syncProgress(auth.user.username, this._snapshot()).catch((err) =>
         console.warn('cloud sync failed', err),
       )
     },
@@ -156,52 +223,108 @@ export const useProgressStore = defineStore('progress', {
         Object.assign(this, emptyState())
         return
       }
+      let data
       try {
-        const data = JSON.parse(raw)
-        Object.assign(this, emptyState(), data)
-        if (!this.settings) this.settings = defaultSettings()
+        data = JSON.parse(raw)
       } catch {
         Object.assign(this, emptyState())
+        return
       }
+      data = migrateLocalV1(data)
+      const next = { ...emptyState(), ...data }
+      next.exams = Array.isArray(next.exams) ? next.exams : []
+      next.knownIds = Array.isArray(next.knownIds) ? next.knownIds : []
+      next.questionStats = deriveStats(next.exams)
+      Object.assign(this, next)
+    },
+    async pullAndMerge() {
+      const auth = useAuthStore()
+      if (!auth.user || !syncEnabled()) return false
+      const remote = await pullAll(auth.user.username)
+      if (!remote) return false
+      const remoteProgress = remote.progress
+      const remoteExams = remote.exams || []
+
+      // Exams: union by id (append-only semantics).
+      const mergedExams = unionExamsById(this.exams, remoteExams)
+      const examsChanged = mergedExams.length !== this.exams.length
+
+      // Progress (settings/active/known/lastActivity): adopt only if
+      // remote is strictly newer than local.
+      let progressChanged = false
+      let next = {
+        settings: this.settings,
+        knownIds: this.knownIds,
+        activeExam: this.activeExam,
+        lastActivityAt: this.lastActivityAt,
+      }
+      if (remoteProgress && remoteProgress.lastActivityAt) {
+        if (
+          !this.lastActivityAt ||
+          remoteProgress.lastActivityAt > this.lastActivityAt
+        ) {
+          next = {
+            settings: { ...defaultSettings(), ...(remoteProgress.settings || {}) },
+            knownIds: Array.isArray(remoteProgress.knownIds) ? remoteProgress.knownIds : [],
+            activeExam: remoteProgress.activeExam || null,
+            lastActivityAt: remoteProgress.lastActivityAt,
+          }
+          progressChanged = true
+        }
+      }
+
+      if (!examsChanged && !progressChanged) {
+        // Still push any local-only finished exams so an earlier offline
+        // submit catches up.
+        const remoteIds = new Set(remoteExams.map((e) => e.id))
+        for (const ex of this.exams) {
+          if (ex.finishedAt && !remoteIds.has(ex.id)) {
+            pushExam(auth.user.username, ex)
+          }
+        }
+        return false
+      }
+
+      this.$patch((state) => {
+        state.exams = mergedExams
+        state.settings = next.settings
+        state.knownIds = next.knownIds
+        state.activeExam = next.activeExam
+        state.lastActivityAt = next.lastActivityAt
+        state.questionStats = deriveStats(mergedExams)
+      })
+      // Persist merged view to localStorage; do NOT push back to cloud
+      // unless we changed something the cloud doesn't have.
+      try {
+        const fullLocal = { ...this._snapshot(), exams: this.exams }
+        localStorage.setItem(storageKey(auth.user.username), JSON.stringify(fullLocal))
+      } catch (err) {
+        console.warn('localStorage write failed', err)
+      }
+      // Push any local-only finished exams (e.g. submitted while offline).
+      const remoteIds = new Set(remoteExams.map((e) => e.id))
+      for (const ex of this.exams) {
+        if (ex.finishedAt && !remoteIds.has(ex.id)) {
+          pushExam(auth.user.username, ex)
+        }
+      }
+      return true
     },
     updateSettings(partial) {
       this.settings = { ...this.settings, ...partial }
       this._persist()
     },
-    // Pull from cloud and adopt only if it's strictly newer than local.
-    // This prevents a stale device (e.g. one that hasn't been opened since
-    // another device finished an exam) from clobbering the cloud snapshot
-    // on its next mutation.
-    async pullAndMerge() {
-      const auth = useAuthStore()
-      if (!auth.user || !syncEnabled()) return false
-      let remote = null
-      try {
-        remote = await pullSnapshot(auth.user.username)
-      } catch {
-        return false
-      }
-      if (!remote || !remote.lastActivityAt) return false
-      const localTs = this.lastActivityAt
-      if (localTs && remote.lastActivityAt <= localTs) return false
-      const merged = { ...emptyState(), ...remote }
-      try {
-        localStorage.setItem(storageKey(auth.user.username), JSON.stringify(merged))
-      } catch {}
-      this.$patch((state) => Object.assign(state, merged))
-      return true
-    },
 
     // ----- exam lifecycle -----
     startExam(allQuestionIds) {
       const settings = this.settings
-      const knownSet = new Set(this.knownQuestionIds)
+      const knownSet = new Set(this.knownIds)
       let pool = allQuestionIds
       if (settings.skipKnown) pool = pool.filter((id) => !knownSet.has(id))
 
       const wrongPool = pool.filter((id) => {
         const s = this.questionStats[id]
-        return s && s.timesWrong > 0 && !s.knownByUser
+        return s && s.timesWrong > 0 && !knownSet.has(id)
       })
       const wrongSet = new Set(wrongPool)
       const freshPool = pool.filter((id) => !wrongSet.has(id))
@@ -213,9 +336,7 @@ export const useProgressStore = defineStore('progress', {
       )
       const wrongPicks = pickRandom(wrongPool, m)
       const remaining = Math.max(0, target - wrongPicks.length)
-      // Stratified by timesAnswered: never-seen first, then seen once, etc.
       let freshPicks = pickByLeastSeen(freshPool, this.questionStats, remaining)
-      // if fresh pool too small, top up from unused wrong pool
       if (freshPicks.length < remaining) {
         const used = new Set(wrongPicks)
         const extra = pickRandom(
@@ -232,7 +353,7 @@ export const useProgressStore = defineStore('progress', {
         finishedAt: null,
         settings: { ...settings },
         questionIds: order,
-        answers: {}, // qid -> { selected, correct, ts }
+        answers: {},
         currentIndex: 0,
         wrongIncluded: wrongPicks.length,
         wrongPoolSize: wrongPool.length,
@@ -262,41 +383,33 @@ export const useProgressStore = defineStore('progress', {
       if (!this.activeExam) return null
       const ex = this.activeExam
       ex.finishedAt = new Date().toISOString()
-      // fold answers into questionStats
-      for (const [qid, a] of Object.entries(ex.answers)) {
-        const s = ensureStat(this.questionStats, qid)
-        s.timesAnswered += 1
-        if (a.correct) {
-          s.timesCorrect += 1
-          s.lastWrong = false
-        } else {
-          s.timesWrong += 1
-          s.lastWrong = true
-        }
-        s.lastAnsweredAt = a.ts
-      }
       this.exams.push(ex)
       this.activeExam = null
       this.lastActivityAt = ex.finishedAt
+      this.questionStats = deriveStats(this.exams)
       this._persist()
+      // Push the finished exam immediately (no debounce) so it can never
+      // be erased by a later progress-only push from a stale device.
+      const auth = useAuthStore()
+      if (auth.user) pushExam(auth.user.username, ex)
       return ex
     },
     async cancelActive() {
-      // Defensive: if another device finished this exam in the meantime,
-      // the cloud snapshot is newer — adopt it instead of overwriting.
+      // Refresh first so we don't clobber a snapshot newer than ours.
       await this.pullAndMerge()
       if (!this.activeExam) return
       this.activeExam = null
       this.lastActivityAt = new Date().toISOString()
       this._persist()
     },
-    // ----- per-question flags -----
     setKnown(qid, known) {
-      const s = ensureStat(this.questionStats, qid)
-      s.knownByUser = !!known
+      const set = new Set(this.knownIds)
+      if (known) set.add(qid)
+      else set.delete(qid)
+      this.knownIds = [...set]
+      this.lastActivityAt = new Date().toISOString()
       this._persist()
     },
-    // ----- review helpers -----
     getExam(examId) {
       return this.exams.find((e) => e.id === examId) ?? null
     },
