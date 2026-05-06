@@ -94,7 +94,7 @@ function fmt2(n) {
 <template>
   <div>
     <div class="topbar">
-      <h1>Juliet 模擬考</h1>
+      <h1>月月 模擬考</h1>
       <div style="display: flex; gap: 6px">
         <button
           v-if="auth.isAdmin"
