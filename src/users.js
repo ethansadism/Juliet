@@ -4,4 +4,5 @@ export const USERS = [
   { username: 'user1', password: '1234', displayName: 'User 1' },
   { username: 'user2', password: '1234', displayName: 'User 2' },
   { username: 'demo', password: 'demo', displayName: 'Demo' },
+  { username: 'yueh', password: '1122', displayName: '月月' },
 ]
