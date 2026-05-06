@@ -22,7 +22,15 @@
 
 const USERS_SHEET = '_users';
 const PROGRESS_SHEET = '_progress';
+const EXAMS_SHEET = '_exams';
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+const EXAMS_HEADERS = [
+  'username', 'examId', 'startedAt', 'finishedAt',
+  'questionCount', 'correctCount',
+  'settings', 'questionIds', 'answers',
+  'wrongIncluded', 'wrongPoolSize',
+];
 
 // =====================================================================
 // Manual setup helpers — run from the Apps Script editor, not via web.
@@ -54,7 +62,8 @@ function listUsersLog() {
 function doGet(e) {
   const params = e.parameter || {};
   try {
-    if (params.op === 'get') return json_(handleGetProgress_(params));
+    if (params.op === 'get')    return json_(handleGetProgress_(params));
+    if (params.op === 'getAll') return json_(handleGetAll_(params));
     return json_({ error: 'unknown op' });
   } catch (err) {
     return json_({ error: String(err && err.message || err) });
@@ -73,6 +82,7 @@ function doPost(e) {
       case 'login':           return json_(handleLogin_(body));
       case 'changePassword':  return json_(handleChangePassword_(body));
       case 'put':             return json_(handlePutProgress_(body));
+      case 'putExam':         return json_(handlePutExam_(body));
       case 'adminListUsers':  return json_(handleAdminListUsers_(body));
       case 'adminUpsertUser': return json_(handleAdminUpsertUser_(body));
       case 'adminDeleteUser': return json_(handleAdminDeleteUser_(body));
@@ -120,42 +130,179 @@ function handleChangePassword_(body) {
 function handlePutProgress_(body) {
   const session = requireSession_(body);
   const target = String(body.username || session.username);
-  // Non-admin can only write own snapshot.
   if (target !== session.username && session.role !== 'admin') {
     return { error: 'forbidden' };
   }
-  const sh = sheet_(PROGRESS_SHEET, ['username', 'updatedAt', 'snapshot']);
-  const row = findRow_(sh, target);
-  const ts = new Date().toISOString();
-  const blob = JSON.stringify(body.snapshot ?? null);
-  if (row < 0) {
-    sh.appendRow([target, ts, blob]);
-  } else {
-    sh.getRange(row, 2).setValue(ts);
-    sh.getRange(row, 3).setValue(blob);
+  let snap = body.snapshot;
+  // Defensive: an old client may still post the legacy {exams,questionStats}
+  // shape. Migrate it into the new model so we never lose data.
+  if (snap && (Array.isArray(snap.exams) || snap.questionStats)) {
+    snap = migrateLegacySnapshot_(target, snap);
   }
-  return { ok: true, updatedAt: ts };
+  writeProgressRow_(target, snap);
+  return { ok: true, updatedAt: new Date().toISOString() };
+}
+
+function handlePutExam_(body) {
+  const session = requireSession_(body);
+  const target = String(body.username || session.username);
+  if (target !== session.username && session.role !== 'admin') {
+    return { error: 'forbidden' };
+  }
+  const exam = body.exam;
+  if (!exam || !exam.id) return { error: 'missing exam' };
+  upsertExam_(target, exam);
+  return { ok: true };
 }
 
 function handleGetProgress_(params) {
-  // GET only: token must be query param `token`. Username may be omitted
-  // (defaults to session username); admin can fetch others.
   const session = requireSession_({ token: params.token });
   const target = String(params.username || session.username);
   if (target !== session.username && session.role !== 'admin') {
     return { error: 'forbidden' };
   }
+  return { snapshot: readProgress_(target) };
+}
+
+function handleGetAll_(params) {
+  const session = requireSession_({ token: params.token });
+  const target = String(params.username || session.username);
+  if (target !== session.username && session.role !== 'admin') {
+    return { error: 'forbidden' };
+  }
+  return {
+    progress: readProgress_(target),
+    exams: readExams_(target),
+  };
+}
+
+// =====================================================================
+// Progress + exams I/O (with one-shot migration of legacy snapshots)
+// =====================================================================
+
+function readProgress_(username) {
   const sh = sheet_(PROGRESS_SHEET, ['username', 'updatedAt', 'snapshot']);
-  const row = findRow_(sh, target);
-  if (row < 0) return { snapshot: null };
-  let snapshot = null;
+  const row = findRow_(sh, username);
+  if (row < 0) return null;
+  let snap = null;
   try {
     const cell = sh.getRange(row, 3).getValue();
-    snapshot = cell ? JSON.parse(cell) : null;
+    snap = cell ? JSON.parse(cell) : null;
   } catch (err) {
-    snapshot = null;
+    return null;
   }
-  return { snapshot };
+  if (!snap) return null;
+  if (Array.isArray(snap.exams) || snap.questionStats) {
+    snap = migrateLegacySnapshot_(username, snap);
+    writeProgressRow_(username, snap);
+  }
+  return snap;
+}
+
+function writeProgressRow_(username, snap) {
+  const sh = sheet_(PROGRESS_SHEET, ['username', 'updatedAt', 'snapshot']);
+  const row = findRow_(sh, username);
+  const ts = new Date().toISOString();
+  const blob = JSON.stringify(snap ?? null);
+  if (row < 0) sh.appendRow([username, ts, blob]);
+  else {
+    sh.getRange(row, 2).setValue(ts);
+    sh.getRange(row, 3).setValue(blob);
+  }
+}
+
+function readExams_(username) {
+  const sh = sheet_(EXAMS_SHEET, EXAMS_HEADERS);
+  const data = sh.getDataRange().getValues();
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] !== username) continue;
+    out.push({
+      id: data[i][1],
+      startedAt: data[i][2],
+      finishedAt: data[i][3] || null,
+      questionCount: Number(data[i][4]) || 0,
+      correctCount: Number(data[i][5]) || 0,
+      settings: parseJson_(data[i][6], {}),
+      questionIds: parseJson_(data[i][7], []),
+      answers: parseJson_(data[i][8], {}),
+      wrongIncluded: Number(data[i][9]) || 0,
+      wrongPoolSize: Number(data[i][10]) || 0,
+    });
+  }
+  out.sort(function (a, b) { return a.startedAt < b.startedAt ? -1 : 1; });
+  return out;
+}
+
+function upsertExam_(username, exam) {
+  const sh = sheet_(EXAMS_SHEET, EXAMS_HEADERS);
+  const data = sh.getDataRange().getValues();
+  let row = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === username && data[i][1] === exam.id) { row = i + 1; break; }
+  }
+  const answers = exam.answers || {};
+  let correct = 0;
+  for (const k in answers) if (answers[k] && answers[k].correct) correct++;
+  const values = [
+    username,
+    exam.id,
+    exam.startedAt || '',
+    exam.finishedAt || '',
+    (exam.questionIds || []).length,
+    correct,
+    JSON.stringify(exam.settings || {}),
+    JSON.stringify(exam.questionIds || []),
+    JSON.stringify(answers),
+    Number(exam.wrongIncluded) || 0,
+    Number(exam.wrongPoolSize) || 0,
+  ];
+  if (row < 0) sh.appendRow(values);
+  else sh.getRange(row, 1, 1, values.length).setValues([values]);
+}
+
+function migrateLegacySnapshot_(username, snap) {
+  // 1. Lift exams[] into the _exams sheet (idempotent by examId)
+  if (Array.isArray(snap.exams)) {
+    const existing = readExamIds_(username);
+    for (const ex of snap.exams) {
+      if (!ex || !ex.id) continue;
+      if (existing.has(ex.id)) continue;
+      upsertExam_(username, ex);
+      existing.add(ex.id);
+    }
+  }
+  // 2. Convert questionStats[*].knownByUser → knownIds
+  let knownIds = Array.isArray(snap.knownIds) ? snap.knownIds.slice() : null;
+  if (!knownIds && snap.questionStats) {
+    knownIds = [];
+    for (const qid in snap.questionStats) {
+      const s = snap.questionStats[qid];
+      if (s && s.knownByUser) knownIds.push(qid);
+    }
+  }
+  return {
+    version: 2,
+    settings: snap.settings || {},
+    knownIds: knownIds || [],
+    activeExam: snap.activeExam || null,
+    lastActivityAt: snap.lastActivityAt || null,
+  };
+}
+
+function readExamIds_(username) {
+  const sh = sheet_(EXAMS_SHEET, EXAMS_HEADERS);
+  const data = sh.getDataRange().getValues();
+  const ids = new Set();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === username) ids.add(data[i][1]);
+  }
+  return ids;
+}
+
+function parseJson_(s, dflt) {
+  if (s == null || s === '') return dflt;
+  try { return JSON.parse(s); } catch (err) { return dflt; }
 }
 
 function handleAdminListUsers_(body) {
@@ -200,10 +347,15 @@ function handleAdminDeleteUser_(body) {
   const sh = sheet_(USERS_SHEET, ['username', 'displayName', 'role', 'salt', 'passwordHash', 'updatedAt']);
   const row = findRow_(sh, username);
   if (row > 0) sh.deleteRow(row);
-  // Clean up progress too.
+  // Clean up progress + exams too.
   const psh = sheet_(PROGRESS_SHEET, ['username', 'updatedAt', 'snapshot']);
   const prow = findRow_(psh, username);
   if (prow > 0) psh.deleteRow(prow);
+  const esh = sheet_(EXAMS_SHEET, EXAMS_HEADERS);
+  const edata = esh.getDataRange().getValues();
+  for (let i = edata.length - 1; i >= 1; i--) {
+    if (edata[i][0] === username) esh.deleteRow(i + 1);
+  }
   return { ok: true };
 }
 

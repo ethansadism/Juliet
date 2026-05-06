@@ -56,8 +56,9 @@ export const api = {
   login: (username, password) => post('login', { username, password }),
   changePassword: (oldPassword, newPassword) =>
     post('changePassword', { oldPassword, newPassword }),
-  getProgress: (username) => get('get', username ? { username } : {}),
+  getAll: (username) => get('getAll', username ? { username } : {}),
   putProgress: (username, snapshot) => post('put', { username, snapshot }),
+  putExam: (username, exam) => post('putExam', { username, exam }),
   adminListUsers: () => post('adminListUsers'),
   adminUpsertUser: (payload) => post('adminUpsertUser', payload),
   adminDeleteUser: (username) => post('adminDeleteUser', { username }),

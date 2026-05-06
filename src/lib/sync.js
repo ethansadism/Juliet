@@ -1,5 +1,10 @@
-// Cross-device progress sync. localStorage is the source of truth;
-// the cloud copy is a snapshot pushed (debounced) after each mutation.
+// Cross-device progress sync. localStorage is the source of truth for the
+// running session; the cloud copy is split into two pieces:
+//   _progress sheet : settings + knownIds + activeExam + lastActivityAt
+//   _exams sheet    : append-only, one row per submitted exam
+//
+// progress is debounced; exams are pushed immediately on submit so a
+// completed exam can never be wiped by a stale-device snapshot push.
 
 import { api, apiEnabled } from './api.js'
 
@@ -29,13 +34,25 @@ async function flush() {
   }
 }
 
-export async function pullSnapshot(username) {
+export async function pushExam(username, exam) {
+  if (!syncEnabled()) return
+  try {
+    await api.putExam(username, exam)
+  } catch (err) {
+    console.warn('exam push failed', err.message)
+  }
+}
+
+export async function pullAll(username) {
   if (!syncEnabled()) return null
   try {
-    const data = await api.getProgress(username)
-    return data?.snapshot ?? null
+    const data = await api.getAll(username)
+    return {
+      progress: data?.progress ?? null,
+      exams: data?.exams ?? [],
+    }
   } catch (err) {
-    console.warn('progress pull failed', err.message)
+    console.warn('pullAll failed', err.message)
     return null
   }
 }

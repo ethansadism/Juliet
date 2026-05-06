@@ -57,7 +57,7 @@ const items = computed(() => {
       q,
       ans,
       timesWrong: stat?.timesWrong ?? 0,
-      knownByUser: stat?.knownByUser ?? false,
+      knownByUser: progress.knownSet.has(qid),
     })
   })
   return arr
