@@ -10,7 +10,7 @@ Vue 3 + Pinia 打造的手機優先模擬考站,題庫直接從 Google Sheet 拉
   匯出成 `public/data/questions.json`(免 API key,sheet 須為「知道連結的人可檢視」)
 - **進度**: `localStorage` 為主(離線可用)
 - **跨裝置同步(可選)**: Google Apps Script Web App,參見 `apps-script/Code.gs`
-- **登入**: 寫死帳號於 `src/users.js`,日後可換成 Google OAuth
+- **登入**: SHA-256 + salt 存於 sheet 的 `_users` 隱藏分頁,Apps Script 驗證後簽 30 天 HMAC token
 
 ## 本機開發
 
@@ -38,32 +38,39 @@ npm run dev             # http://localhost:5173
 
 部署完成後網址通常是 `https://<user>.github.io/<repo>/`。
 
-## 帳號管理
+## 帳號與後端
 
-`src/users.js` 內目前的佔位帳號:
+帳號密碼以 SHA-256 + salt 儲存在 sheet 的隱藏分頁 `_users`,
+登入透過 Apps Script 驗證,前端只持有一個 30 天的 HMAC token。
+**前端不再有任何明碼帳號**,因此本系統需要 Apps Script 後端才能登入。
 
-| 帳號 | 密碼 |
-| ---- | ---- |
-| user1 | 1234 |
-| user2 | 1234 |
-| demo  | demo |
-
-> ⚠️ 密碼會打包進前端 JS,任何人都能看到。請勿沿用您其他平台的密碼。
-
-## 跨裝置同步(選用)
+### 一次性設定 Apps Script
 
 1. 開啟您的 Google Sheet → 擴充功能 → Apps Script。
 2. 把 `apps-script/Code.gs` 內容貼上去儲存。
 3. **部署 → 新增部署** → 類型 = Web app
    - 「以使用者身分執行」: 我
    - 「具有存取權的對象」: 知道連結的任何人
-4. 複製產生的網址,填入 GitHub Secret `SYNC_URL`。
-5. 重新觸發 Action(push 一個 commit 或手動執行 workflow)即可生效。
+4. 複製產生的 web app URL,填入 GitHub Secret `SYNC_URL`。
+5. 在 Apps Script 編輯器:
+   - 編輯 `seedAdmin()` 函式裡的 `password` 變數設一個您要的初始管理員密碼。
+   - 函式下拉選單選 `seedAdmin` → Run。第一次會要求授權,允許即可。
+   - 跑完之後把那行密碼改回 `'CHANGE_ME_NOW'` 存檔(避免將來不小心又跑)。
+6. 重新觸發 Action(push 一個 commit 或手動執行 workflow)讓網站接到新的 SYNC_URL。
 
-啟用後:
-- 每次答題/設定變更會在 1.5s debounce 後 push 到 sheet。
-- 登入時會 pull 一次,若雲端較新則覆蓋本機。
-- 若 web app 失敗(離線、被 rate limit 等),仍以 localStorage 為準,不影響使用。
+登入後管理員會在右上角看到「管理」按鈕,可以新增/刪除使用者、
+重設任意密碼、或改變角色。一般使用者忘記密碼時,請管理員到該頁重設。
+
+### 跨裝置同步(隨後即啟用)
+
+只要設了 `SYNC_URL`,進度就會自動同步到 sheet 的另一個隱藏分頁 `_progress`:
+
+- 每次答題/設定變更 1.5s debounce 後 push。
+- 登入時會 pull 一次,若雲端較新則覆蓋本機(last-writer-wins)。
+- 離線或 rate limit 時自動退化為純 localStorage 模式,
+  下次連線會自動再 push。
+
+> 看不到資料?在試算表「檢視 → 顯示 → 隱藏的工作表」可以打開 `_users` / `_progress`。
 
 ## 題庫格式
 
@@ -89,16 +96,16 @@ npm run dev             # http://localhost:5173
 
 ```
 scripts/fetch-sheet.mjs   build 時抓 sheet → JSON
-apps-script/Code.gs       選用同步後端
+apps-script/Code.gs       後端:登入 / 管理 / 進度同步
 src/
   main.js / App.vue / router.js
-  users.js                帳號清單
   styles.css              全域樣式(手機優先,深色)
   lib/
     parseQuestion.js      題目+選項拆解、答案比對
-    sync.js               Apps Script 同步用的 client
+    api.js                Apps Script 共用 client(token、登入、管理、同步)
+    sync.js               進度的 push / pull 包裝(debounce)
   stores/
-    auth.js               登入狀態
+    auth.js               登入狀態 + token
     questions.js          題庫載入
     progress.js           進度、考試生命週期、設定
   views/
@@ -107,4 +114,5 @@ src/
     Exam.vue              答題頁
     ReviewList.vue        歷史考試列表
     Review.vue            單次考試檢討
+    Admin.vue             管理員專用(新增/重設/刪除使用者)
 ```

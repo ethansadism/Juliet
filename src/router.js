@@ -15,6 +15,12 @@ const router = createRouter({
       component: () => import('./views/Review.vue'),
       props: true,
     },
+    {
+      path: '/admin',
+      name: 'admin',
+      component: () => import('./views/Admin.vue'),
+      meta: { requireAdmin: true },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })
@@ -26,6 +32,9 @@ router.beforeEach((to) => {
     return { name: 'login' }
   }
   if (to.name === 'login' && auth.user) {
+    return { name: 'home' }
+  }
+  if (to.meta.requireAdmin && !auth.isAdmin) {
     return { name: 'home' }
   }
 })

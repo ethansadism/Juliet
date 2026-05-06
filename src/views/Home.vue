@@ -95,9 +95,19 @@ function fmt2(n) {
   <div>
     <div class="topbar">
       <h1>Juliet 模擬考</h1>
-      <button class="btn ghost" style="width: auto; padding: 8px 12px; margin: 0" @click="logout">
-        登出
-      </button>
+      <div style="display: flex; gap: 6px">
+        <button
+          v-if="auth.isAdmin"
+          class="btn ghost"
+          style="width: auto; padding: 8px 12px; margin: 0"
+          @click="router.push({ name: 'admin' })"
+        >
+          管理
+        </button>
+        <button class="btn ghost" style="width: auto; padding: 8px 12px; margin: 0" @click="logout">
+          登出
+        </button>
+      </div>
     </div>
 
     <div v-if="questions.error" class="error">無法載入題庫:{{ questions.error }}</div>

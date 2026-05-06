@@ -1,38 +1,51 @@
 import { defineStore } from 'pinia'
+import { api, apiEnabled, getToken, setToken } from '../lib/api.js'
 
-// Placeholder accounts. Edit src/users.js to manage the real list.
-import { USERS } from '../users.js'
-
-const STORAGE_KEY = 'juliet:auth:user'
+const USER_KEY = 'juliet:auth:user'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
-    user: null,
+    user: null, // { username, displayName, role }
     hydrated: false,
   }),
+  getters: {
+    isAdmin: (s) => s.user?.role === 'admin',
+  },
   actions: {
     hydrate() {
       if (this.hydrated) return
       this.hydrated = true
+      if (!getToken()) {
+        this.user = null
+        return
+      }
       try {
-        const raw = localStorage.getItem(STORAGE_KEY)
+        const raw = localStorage.getItem(USER_KEY)
         if (raw) this.user = JSON.parse(raw)
       } catch {
         this.user = null
       }
     },
-    login(username, password) {
-      const u = USERS.find(
-        (x) => x.username === username.trim() && x.password === password,
-      )
-      if (!u) return false
-      this.user = { username: u.username, displayName: u.displayName ?? u.username }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.user))
-      return true
+    async login(username, password) {
+      if (!apiEnabled()) {
+        throw new Error('登入後端未設定 (VITE_SYNC_URL)')
+      }
+      const data = await api.login(username, password)
+      setToken(data.token)
+      this.user = {
+        username: data.username,
+        displayName: data.displayName || data.username,
+        role: data.role || 'user',
+      }
+      localStorage.setItem(USER_KEY, JSON.stringify(this.user))
+    },
+    async changePassword(oldPassword, newPassword) {
+      await api.changePassword(oldPassword, newPassword)
     },
     logout() {
       this.user = null
-      localStorage.removeItem(STORAGE_KEY)
+      setToken(null)
+      localStorage.removeItem(USER_KEY)
     },
   },
 })
