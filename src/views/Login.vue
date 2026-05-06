@@ -21,33 +21,38 @@ async function submit() {
     return
   }
   busy.value = true
-  const ok = auth.login(username.value, password.value)
-  if (!ok) {
-    error.value = '帳號或密碼不正確'
-    busy.value = false
-    return
-  }
-  // Try cloud pull (only overrides local if local is empty/older)
-  if (syncEnabled()) {
-    try {
-      const remote = await pullSnapshot(auth.user.username)
-      if (remote) {
-        const localRaw = localStorage.getItem(`juliet:progress:${auth.user.username}`)
-        const localTs = localRaw ? JSON.parse(localRaw).lastActivityAt : null
-        if (!localTs || (remote.lastActivityAt && remote.lastActivityAt > localTs)) {
-          localStorage.setItem(
-            `juliet:progress:${auth.user.username}`,
-            JSON.stringify(remote),
-          )
+  try {
+    await auth.login(username.value.trim(), password.value)
+    if (syncEnabled()) {
+      try {
+        const remote = await pullSnapshot(auth.user.username)
+        if (remote) {
+          const localRaw = localStorage.getItem(`juliet:progress:${auth.user.username}`)
+          const localTs = localRaw ? JSON.parse(localRaw).lastActivityAt : null
+          if (!localTs || (remote.lastActivityAt && remote.lastActivityAt > localTs)) {
+            localStorage.setItem(
+              `juliet:progress:${auth.user.username}`,
+              JSON.stringify(remote),
+            )
+          }
         }
+      } catch {
+        // offline ok — local data still works
       }
-    } catch {
-      // ignore — offline ok
     }
+    progress.hydrate()
+    router.replace({ name: 'home' })
+  } catch (err) {
+    if (err.code === 'invalid credentials') {
+      error.value = '帳號或密碼不正確'
+    } else if (err.message?.includes('VITE_SYNC_URL')) {
+      error.value = '登入後端未設定,請聯絡管理員'
+    } else {
+      error.value = err.message || String(err)
+    }
+  } finally {
+    busy.value = false
   }
-  progress.hydrate()
-  busy.value = false
-  router.replace({ name: 'home' })
 }
 </script>
 
@@ -80,8 +85,8 @@ async function submit() {
           {{ busy ? '登入中…' : '登入' }}
         </button>
       </form>
-      <p class="muted" style="margin-top: 12px">
-        目前為佔位帳號:user1 / 1234, demo / demo
+      <p class="muted" style="margin-top: 12px; font-size: 13px">
+        忘記密碼請洽管理員重設。
       </p>
     </div>
   </div>
