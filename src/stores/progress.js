@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { isCorrect } from '../lib/parseQuestion.js'
 import { useAuthStore } from './auth.js'
-import { syncProgress } from '../lib/sync.js'
+import { syncEnabled, syncProgress, pullSnapshot } from '../lib/sync.js'
 
 const VERSION = 1
 
@@ -168,6 +168,29 @@ export const useProgressStore = defineStore('progress', {
       this.settings = { ...this.settings, ...partial }
       this._persist()
     },
+    // Pull from cloud and adopt only if it's strictly newer than local.
+    // This prevents a stale device (e.g. one that hasn't been opened since
+    // another device finished an exam) from clobbering the cloud snapshot
+    // on its next mutation.
+    async pullAndMerge() {
+      const auth = useAuthStore()
+      if (!auth.user || !syncEnabled()) return false
+      let remote = null
+      try {
+        remote = await pullSnapshot(auth.user.username)
+      } catch {
+        return false
+      }
+      if (!remote || !remote.lastActivityAt) return false
+      const localTs = this.lastActivityAt
+      if (localTs && remote.lastActivityAt <= localTs) return false
+      const merged = { ...emptyState(), ...remote }
+      try {
+        localStorage.setItem(storageKey(auth.user.username), JSON.stringify(merged))
+      } catch {}
+      this.$patch((state) => Object.assign(state, merged))
+      return true
+    },
 
     // ----- exam lifecycle -----
     startExam(allQuestionIds) {
@@ -258,8 +281,13 @@ export const useProgressStore = defineStore('progress', {
       this._persist()
       return ex
     },
-    cancelActive() {
+    async cancelActive() {
+      // Defensive: if another device finished this exam in the meantime,
+      // the cloud snapshot is newer — adopt it instead of overwriting.
+      await this.pullAndMerge()
+      if (!this.activeExam) return
       this.activeExam = null
+      this.lastActivityAt = new Date().toISOString()
       this._persist()
     },
     // ----- per-question flags -----

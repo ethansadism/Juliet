@@ -12,7 +12,9 @@ const questions = useQuestionsStore()
 
 onMounted(async () => {
   progress.hydrate()
-  await questions.load()
+  // Pull cloud state in parallel with question load so we never act on
+  // stale data left behind by another device.
+  await Promise.all([questions.load(), progress.pullAndMerge()])
 })
 
 const total = computed(() => questions.total || 0)
@@ -62,9 +64,9 @@ function commitSettings() {
   })
 }
 
-function startExam() {
+async function startExam() {
   commitSettings()
-  if (progress.activeExam) progress.cancelActive()
+  if (progress.activeExam) await progress.cancelActive()
   const ids = questions.questions.map((q) => q.id)
   if (!ids.length) return
   progress.startExam(ids)
@@ -76,9 +78,9 @@ function continueExam() {
   router.push({ name: 'exam' })
 }
 
-function discardActive() {
+async function discardActive() {
   if (!confirm('確定要捨棄目前未完成的測驗嗎?')) return
-  progress.cancelActive()
+  await progress.cancelActive()
 }
 
 function logout() {
