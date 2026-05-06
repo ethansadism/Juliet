@@ -42,6 +42,26 @@ function pickRandom(pool, n) {
   return shuffle(pool).slice(0, n)
 }
 
+// Stratified pick: prefer questions seen the fewest times. This way, until
+// every question has been answered at least once, no never-seen question is
+// passed over in favour of a repeat.
+function pickByLeastSeen(ids, stats, n) {
+  if (n <= 0) return []
+  const buckets = new Map()
+  for (const id of ids) {
+    const t = stats[id]?.timesAnswered ?? 0
+    if (!buckets.has(t)) buckets.set(t, [])
+    buckets.get(t).push(id)
+  }
+  const keys = [...buckets.keys()].sort((a, b) => a - b)
+  const out = []
+  for (const k of keys) {
+    if (out.length >= n) break
+    out.push(...pickRandom(buckets.get(k), n - out.length))
+  }
+  return out
+}
+
 function ensureStat(stats, qid) {
   if (!stats[qid]) {
     stats[qid] = {
@@ -170,7 +190,8 @@ export const useProgressStore = defineStore('progress', {
       )
       const wrongPicks = pickRandom(wrongPool, m)
       const remaining = Math.max(0, target - wrongPicks.length)
-      let freshPicks = pickRandom(freshPool, remaining)
+      // Stratified by timesAnswered: never-seen first, then seen once, etc.
+      let freshPicks = pickByLeastSeen(freshPool, this.questionStats, remaining)
       // if fresh pool too small, top up from unused wrong pool
       if (freshPicks.length < remaining) {
         const used = new Set(wrongPicks)
