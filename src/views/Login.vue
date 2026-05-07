@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth.js'
 import { useProgressStore } from '../stores/progress.js'
+import { withSync } from '../lib/sync.js'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -23,7 +24,7 @@ async function submit() {
   try {
     await auth.login(username.value.trim(), password.value)
     progress.hydrate()
-    await progress.pullAndMerge()
+    await withSync(() => progress.pullAndMerge())
     router.replace({ name: 'home' })
   } catch (err) {
     if (err.code === 'invalid credentials') {

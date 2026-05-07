@@ -152,6 +152,8 @@ function handlePutExam_(body) {
   const exam = body.exam;
   if (!exam || !exam.id) return { error: 'missing exam' };
   upsertExam_(target, exam);
+  // Fire-and-forget: queue a debounced backup for ~60s from now.
+  scheduleOneShotBackup_();
   return { ok: true };
 }
 
@@ -486,4 +488,93 @@ function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(
     ContentService.MimeType.JSON,
   );
+}
+
+// =====================================================================
+// Backup: hourly cron + post-submit one-shot, 24h retention
+// =====================================================================
+//
+// Setup (one-shot, from Apps Script editor):
+//   1. Choose `setupBackupTrigger` from the function dropdown → Run.
+//      That installs an hourly time trigger that runs runHourlyBackup.
+//   2. The first time it (or runOneShotBackup) runs Drive permissions
+//      will be requested — accept them.
+//
+// Each backup creates a Google Sheets copy named
+//   "Juliet backup YYYY-MM-DDTHH-mm-ss-sssZ (reason)"
+// in a sibling folder called "Juliet Backups". Anything older than
+// 24h whose name starts with "Juliet backup " is moved to trash.
+
+const BACKUP_FOLDER_NAME = 'Juliet Backups';
+const BACKUP_RETENTION_MS = 24 * 60 * 60 * 1000;
+const ONESHOT_HANDLER = 'runOneShotBackup';
+const HOURLY_HANDLER = 'runHourlyBackup';
+
+function setupBackupTrigger() {
+  for (const t of ScriptApp.getProjectTriggers()) {
+    if (t.getHandlerFunction() === HOURLY_HANDLER) ScriptApp.deleteTrigger(t);
+  }
+  ScriptApp.newTrigger(HOURLY_HANDLER).timeBased().everyHours(1).create();
+  Logger.log('Hourly backup trigger installed.');
+}
+
+function runHourlyBackup() {
+  runBackup_('hourly');
+}
+
+function runOneShotBackup() {
+  // Self-clean so a future submit can schedule another.
+  for (const t of ScriptApp.getProjectTriggers()) {
+    if (t.getHandlerFunction() === ONESHOT_HANDLER) ScriptApp.deleteTrigger(t);
+  }
+  runBackup_('post-submit');
+}
+
+// Called from handlePutExam_. Schedules a single backup ~60s out and
+// debounces against bursts of submits — at most one one-shot is queued
+// at a time, so multiple consecutive submits coalesce into one backup.
+function scheduleOneShotBackup_() {
+  for (const t of ScriptApp.getProjectTriggers()) {
+    if (t.getHandlerFunction() === ONESHOT_HANDLER) return;
+  }
+  try {
+    ScriptApp.newTrigger(ONESHOT_HANDLER).timeBased().after(60 * 1000).create();
+  } catch (err) {
+    // Trigger quota exceeded or similar — just log; hourly will catch up.
+    Logger.log('schedule one-shot backup failed: %s', err);
+  }
+}
+
+function runBackup_(reason) {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const folder = backupsFolder_();
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const name = 'Juliet backup ' + ts + ' (' + (reason || 'manual') + ')';
+    DriveApp.getFileById(ss.getId()).makeCopy(name, folder);
+    pruneOldBackups_(folder);
+    Logger.log('Backup OK: %s', name);
+  } catch (err) {
+    Logger.log('Backup failed: %s', err);
+  }
+}
+
+function backupsFolder_() {
+  const ss = SpreadsheetApp.getActive();
+  const file = DriveApp.getFileById(ss.getId());
+  const parents = file.getParents();
+  const parent = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  const it = parent.getFoldersByName(BACKUP_FOLDER_NAME);
+  if (it.hasNext()) return it.next();
+  return parent.createFolder(BACKUP_FOLDER_NAME);
+}
+
+function pruneOldBackups_(folder) {
+  const cutoff = Date.now() - BACKUP_RETENTION_MS;
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    if (!f.getName().startsWith('Juliet backup ')) continue;
+    if (f.getDateCreated().getTime() < cutoff) f.setTrashed(true);
+  }
 }

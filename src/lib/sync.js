@@ -6,7 +6,23 @@
 // progress is debounced; exams are pushed immediately on submit so a
 // completed exam can never be wiped by a stale-device snapshot push.
 
+import { ref } from 'vue'
 import { api, apiEnabled } from './api.js'
+
+// Reactive counter incremented while a user-initiated sync is in flight
+// (login pull, exam submit, discard, manual refresh). The App-level
+// overlay watches this and blocks pointer input so a finger landing on
+// "submit" the moment after it was tapped can't double-fire.
+export const syncingCount = ref(0)
+
+export async function withSync(fn) {
+  syncingCount.value++
+  try {
+    return await fn()
+  } finally {
+    syncingCount.value--
+  }
+}
 
 let pushTimer = null
 let pending = null

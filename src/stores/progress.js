@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { isCorrect } from '../lib/parseQuestion.js'
 import { useAuthStore } from './auth.js'
-import { syncEnabled, syncProgress, pushExam, pullAll } from '../lib/sync.js'
+import { syncEnabled, syncProgress, pushExam, pullAll, withSync } from '../lib/sync.js'
 
 const VERSION = 2
 
@@ -379,28 +379,33 @@ export const useProgressStore = defineStore('progress', {
       this.lastActivityAt = this.activeExam.answers[qid].ts
       this._persist()
     },
-    submitActive() {
+    async submitActive() {
       if (!this.activeExam) return null
-      const ex = this.activeExam
-      ex.finishedAt = new Date().toISOString()
-      this.exams.push(ex)
-      this.activeExam = null
-      this.lastActivityAt = ex.finishedAt
-      this.questionStats = deriveStats(this.exams)
-      this._persist()
-      // Push the finished exam immediately (no debounce) so it can never
-      // be erased by a later progress-only push from a stale device.
-      const auth = useAuthStore()
-      if (auth.user) pushExam(auth.user.username, ex)
-      return ex
+      return withSync(async () => {
+        const ex = this.activeExam
+        ex.finishedAt = new Date().toISOString()
+        this.exams.push(ex)
+        this.activeExam = null
+        this.lastActivityAt = ex.finishedAt
+        this.questionStats = deriveStats(this.exams)
+        this._persist()
+        // Push the finished exam immediately (no debounce) so it can never
+        // be erased by a later progress-only push from a stale device.
+        // Awaited so the syncing overlay covers the whole round-trip.
+        const auth = useAuthStore()
+        if (auth.user) await pushExam(auth.user.username, ex)
+        return ex
+      })
     },
     async cancelActive() {
-      // Refresh first so we don't clobber a snapshot newer than ours.
-      await this.pullAndMerge()
-      if (!this.activeExam) return
-      this.activeExam = null
-      this.lastActivityAt = new Date().toISOString()
-      this._persist()
+      return withSync(async () => {
+        // Refresh first so we don't clobber a snapshot newer than ours.
+        await this.pullAndMerge()
+        if (!this.activeExam) return
+        this.activeExam = null
+        this.lastActivityAt = new Date().toISOString()
+        this._persist()
+      })
     },
     setKnown(qid, known) {
       const set = new Set(this.knownIds)

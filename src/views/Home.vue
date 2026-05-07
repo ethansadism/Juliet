@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth.js'
 import { useProgressStore } from '../stores/progress.js'
 import { useQuestionsStore } from '../stores/questions.js'
+import { withSync } from '../lib/sync.js'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -12,9 +13,11 @@ const questions = useQuestionsStore()
 
 onMounted(async () => {
   progress.hydrate()
-  // Pull cloud state in parallel with question load so we never act on
-  // stale data left behind by another device.
-  await Promise.all([questions.load(), progress.pullAndMerge()])
+  // Question load runs concurrently; the overlay only covers the cloud
+  // pull, since blocking input during the JSON download would feel
+  // heavier than necessary.
+  questions.load()
+  await withSync(() => progress.pullAndMerge())
 })
 
 const total = computed(() => questions.total || 0)
