@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProgressStore } from '../stores/progress.js'
 import { useQuestionsStore } from '../stores/questions.js'
-import { normalizeLetter } from '../lib/parseQuestion.js'
+import { normalizeLetter, isCorrect } from '../lib/parseQuestion.js'
 
 const props = defineProps({ examId: { type: String, required: true } })
 const router = useRouter()
@@ -51,11 +51,19 @@ const items = computed(() => {
     if (!q) return
     const ans = exam.value.answers[qid]
     const stat = progress.questionStats[qid]
+    // Detect post-hoc answer-key changes: re-check the user's selection
+    // against the question's current answer; if the verdict differs from
+    // what was recorded at submit time, the source sheet's answer column
+    // has been edited since.
+    const currentlyCorrect = ans ? isCorrect(q.answer, ans.selected) : null
+    const answerKeyChanged = ans && currentlyCorrect !== ans.correct
     arr.push({
       i: i + 1,
       qid,
       q,
       ans,
+      currentlyCorrect,
+      answerKeyChanged,
       timesWrong: stat?.timesWrong ?? 0,
       knownByUser: progress.knownSet.has(qid),
     })
@@ -124,6 +132,9 @@ function toggleKnown(qid, val) {
           <span v-else-if="it.ans" class="badge bad">答錯</span>
           <span v-else class="badge">未作答</span>
           <span v-if="it.timesWrong > 1" class="badge bad">x{{ it.timesWrong }}!!</span>
+          <span v-if="it.answerKeyChanged" class="badge warn" :title="`當時的判定:${it.ans.correct ? '答對' : '答錯'} → 依目前題庫:${it.currentlyCorrect ? '答對' : '答錯'}`">
+            ⚠ 答案已更新
+          </span>
         </div>
       </div>
       <div class="q-prompt" style="font-size: 16px">{{ it.q.prompt }}</div>
