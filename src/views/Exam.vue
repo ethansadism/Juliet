@@ -64,10 +64,10 @@ function goNext() {
   if (idx.value < totalQ.value - 1) progress.setActiveIndex(idx.value + 1)
 }
 
-function submitExam() {
+async function submitExam() {
   const unanswered = totalQ.value - answeredCount.value
   if (unanswered > 0 && !confirm(`還有 ${unanswered} 題未作答,確定提交?`)) return
-  const ex = progress.submitActive()
+  const ex = await progress.submitActive()
   if (ex) router.replace({ name: 'review', params: { examId: ex.id } })
 }
 
