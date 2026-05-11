@@ -3,6 +3,13 @@
 Vue 3 + Pinia 打造的手機優先模擬考站,題庫直接從 Google Sheet 拉取,
 最終靜態檔部署於 GitHub Pages。
 
+> **想要直接從零部署一份?** 請看 [`SETUP.md`](./SETUP.md) — 順序式 checklist,
+> 跟著走 15~30 分鐘可以蓋好。
+>
+> **要 Claude 幫你蓋一份新的?** 用同樣的 sheet 格式,跟 Claude 說「用
+> quiz-from-sheet skill 幫我做一份新的」即可,skill 在
+> [`skills/quiz-from-sheet/SKILL.md`](./skills/quiz-from-sheet/SKILL.md)。
+
 ## 架構摘要
 
 - **前端**: Vue 3 + Pinia + Vue Router + Vite
@@ -116,3 +123,33 @@ src/
     Review.vue            單次考試檢討
     Admin.vue             管理員專用(新增/重設/刪除使用者)
 ```
+
+## Roadmap / TODO
+
+整理過、暫時不做但記得回頭看的事。優先序大致由上而下。
+
+- [ ] **(小)** `src/lib/api.js` 開頭補一段 backend contract 註解,把目前
+  Apps Script 模式的 op 名稱與回傳 shape 寫清楚,將來換 backend 時
+  contributor 只動這一檔即可。
+- [ ] **(小)** 進度頁顯示題庫上次更新時間(讀 `questions.json` 裡的
+  `fetchedAt`),讓使用者知道何時的快照。
+- [ ] **(小)** Admin 頁加「重新抓題庫」按鈕,呼叫 GitHub workflow_dispatch
+  API 觸發重 build。需要 admin 額外保存一個 GitHub PAT,所以是 nice-to-have。
+- [ ] **(中)** 把這個 repo fork 一份叫 `juliet-template`,在 README 註明
+  「複製後改這些地方就能用」,給未來「真的要再蓋一份」的情境用。
+- [ ] **(中)** 把 `fetch-sheet.mjs` 抽成獨立 npm 套件,任何專案可 `npx`。
+  目前只有一個 caller,先不抽,出現第二個用例時再做。
+- [ ] **(大,有需要時)** 換 backend:Apps Script → Node/Express(或 Cloudflare
+  Workers / Supabase)。預估 1.5~2 天。動的範圍主要在 `src/lib/api.js` +
+  寫一份新的 server。
+- [ ] **(大,有需要時)** 換題庫來源:Google Sheet → DB。預估 1~2 小時。
+  只動 `scripts/fetch-sheet.mjs`,讓它從 DB 撈資料寫成相同 schema 的
+  `questions.json`。前端不動。
+
+不做(經評估過):
+
+- ❌ 把 progress / exam 抽成 generic quiz library —— 一個專案的使用量
+  不夠,抽出去只會多一層約束。
+- ❌ 抽 Vue 元件庫(option button / exam header / sync-overlay)
+  —— 跨專案重用價值低,維護成本不划算。
+- ❌ 改用 OAuth —— 現有 hashed-password 模型對 < 50 人的使用情境綽綽有餘。
