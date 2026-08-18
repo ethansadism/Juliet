@@ -22,16 +22,14 @@ onMounted(async () => {
 
 const total = computed(() => questions.total || 0)
 const totalAttempts = computed(() => progress.totalAttempts)
-const coverPercent = computed(() => {
-  if (!total.value) return 0
-  return (totalAttempts.value / total.value) * 100
-})
-// Distinct coverage next to total attempts makes the repeat rate visible:
-// the gap between the two numbers is exactly how much has been re-served.
+// Distinct coverage is the only one of these worth a percentage: attempts
+// counted against the bank size mixed two different units and would climb
+// past 100% on re-tests. The gap between the two is the repeat count.
 const distinctSeen = computed(() => progress.answeredQuestionCount)
 const distinctPercent = computed(() =>
   total.value ? (distinctSeen.value / total.value) * 100 : 0,
 )
+const repeatCount = computed(() => Math.max(0, totalAttempts.value - distinctSeen.value))
 const correctRate = computed(() => progress.correctRate * 100)
 const avg100 = computed(() => progress.avgSecondsPer100)
 const lastActivity = computed(() => {
@@ -46,51 +44,55 @@ const hasHistory = computed(() => progress.exams.length > 0)
 const wrongPoolSize = computed(() => progress.wrongQuestionIds.length)
 const knownPoolSize = computed(() => progress.knownQuestionIds.length)
 const questionsPerExam = ref(progress.settings.questionsPerExam)
-const errorBar = ref(progress.settings.errorBarPercent)
-const knownBar = ref(progress.settings.knownBarPercent)
+const errorCount = ref(progress.settings.errorCount)
+const knownCount = ref(progress.settings.knownCount)
 
 watch(
   () => progress.settings,
   (s) => {
     questionsPerExam.value = s.questionsPerExam
-    errorBar.value = s.errorBarPercent
-    knownBar.value = s.knownBarPercent
+    errorCount.value = s.errorCount
+    knownCount.value = s.knownCount
   },
   { deep: true },
 )
 
 const examSize = computed(() => Math.max(1, Number(questionsPerExam.value) || 1))
-// Each bar is a share of this exam, so the count is predictable no matter
-// how big the pool behind it grows. (It used to be a share of the pool,
-// which meant 21% could quietly mean "every question in the exam".)
-const errorIncluded = computed(() =>
-  Math.min(wrongPoolSize.value, Math.round((errorBar.value / 100) * examSize.value)),
-)
-const knownIncluded = computed(() =>
-  Math.min(knownPoolSize.value, Math.round((knownBar.value / 100) * examSize.value)),
-)
 const errorBarDisabled = computed(
   () => totalAttempts.value === 0 || wrongPoolSize.value === 0,
 )
 const knownBarDisabled = computed(() => knownPoolSize.value === 0)
 
-// Both bars measure the same exam, so together they simply may not exceed
-// 100%. Capping `max` stops the drag at the boundary rather than silently
-// reallocating afterwards.
-const errorBarMax = computed(() => (errorBarDisabled.value ? 0 : 100 - knownBar.value))
-const knownBarMax = computed(() => (knownBarDisabled.value ? 0 : 100 - errorBar.value))
-const atCapacity = computed(() => errorBar.value + knownBar.value >= 100)
+// A slider can reach as far as its own pool allows, minus whatever the
+// other one has already claimed of the exam. Both limits are real, so the
+// hint below each bar says which one is binding.
+const errorMax = computed(() =>
+  errorBarDisabled.value
+    ? 0
+    : Math.min(wrongPoolSize.value, Math.max(0, examSize.value - knownCount.value)),
+)
+const knownMax = computed(() =>
+  knownBarDisabled.value
+    ? 0
+    : Math.min(knownPoolSize.value, Math.max(0, examSize.value - errorCount.value)),
+)
+const errorLimitedByPool = computed(() => errorMax.value === wrongPoolSize.value)
+const knownLimitedByPool = computed(() => knownMax.value === knownPoolSize.value)
+const freshCount = computed(() =>
+  Math.max(0, examSize.value - errorCount.value - knownCount.value),
+)
+const atCapacity = computed(() => freshCount.value === 0)
 
 // Lowering the question count (or losing pool entries) can strand a slider
 // above its new cap; pull it back down instead of overfilling the exam.
-watch([errorBarMax, knownBarMax], () => {
+watch([errorMax, knownMax], () => {
   let changed = false
-  if (errorBar.value > errorBarMax.value) {
-    errorBar.value = errorBarMax.value
+  if (errorCount.value > errorMax.value) {
+    errorCount.value = errorMax.value
     changed = true
   }
-  if (knownBar.value > knownBarMax.value) {
-    knownBar.value = knownBarMax.value
+  if (knownCount.value > knownMax.value) {
+    knownCount.value = knownMax.value
     changed = true
   }
   if (changed) commitSettings()
@@ -99,8 +101,8 @@ watch([errorBarMax, knownBarMax], () => {
 function commitSettings() {
   progress.updateSettings({
     questionsPerExam: Math.max(1, Math.min(total.value || 3664, Number(questionsPerExam.value) || 1)),
-    errorBarPercent: Math.min(errorBarMax.value, Number(errorBar.value) || 0),
-    knownBarPercent: Math.min(knownBarMax.value, Number(knownBar.value) || 0),
+    errorCount: Math.min(errorMax.value, Number(errorCount.value) || 0),
+    knownCount: Math.min(knownMax.value, Number(knownCount.value) || 0),
   })
 }
 
@@ -168,20 +170,20 @@ function fmt2(n) {
         <h2>{{ auth.user?.displayName }} 的進度</h2>
         <div class="stat-grid">
           <div class="stat">
-            <div class="stat-label">已考過題目</div>
-            <div class="stat-value">
-              {{ totalAttempts }}/{{ total }}
-              <span class="muted" style="font-size: 13px">
-                ({{ fmt2(coverPercent) }}%)
-              </span>
-            </div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">不重複涵蓋</div>
+            <div class="stat-label">題庫進度</div>
             <div class="stat-value">
               {{ distinctSeen }}/{{ total }}
               <span class="muted" style="font-size: 13px">
                 ({{ fmt2(distinctPercent) }}%)
+              </span>
+            </div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">累計作答</div>
+            <div class="stat-value">
+              {{ totalAttempts }} 次
+              <span v-if="repeatCount > 0" class="muted" style="font-size: 13px">
+                (重複 {{ repeatCount }})
               </span>
             </div>
           </div>
@@ -237,23 +239,23 @@ function fmt2(n) {
           <div class="row" style="margin-top: 0">
             <label>強制包含錯題</label>
             <span class="muted">
-              {{ errorIncluded }} / {{ wrongPoolSize }}
+              本次 {{ errorCount }} 題 / 錯題共 {{ wrongPoolSize }} 題
             </span>
           </div>
           <input
             class="range"
             type="range"
             min="0"
-            :max="errorBarMax"
+            :max="errorMax"
             step="1"
             :disabled="errorBarDisabled"
-            v-model.number="errorBar"
+            v-model.number="errorCount"
             @change="commitSettings"
           />
           <div class="muted" style="font-size: 12px; margin-top: 4px">
-            {{ errorBar }}% = 本次 {{ errorIncluded }} 題
-            <span v-if="errorBarDisabled">(尚無錯題,無法使用)</span>
-            <span v-else-if="errorBarMax < 100">· 上限 {{ errorBarMax }}%</span>
+            <span v-if="errorBarDisabled">尚無錯題,無法使用</span>
+            <span v-else-if="errorLimitedByPool">最多 {{ errorMax }} 題(錯題就這麼多)</span>
+            <span v-else>最多 {{ errorMax }} 題(受考卷題數限制)</span>
           </div>
         </div>
 
@@ -261,30 +263,31 @@ function fmt2(n) {
           <div class="row" style="margin-top: 0">
             <label>複習「我會了」的題目</label>
             <span class="muted">
-              {{ knownIncluded }} / {{ knownPoolSize }}
+              本次 {{ knownCount }} 題 / 已標記 {{ knownPoolSize }} 題
             </span>
           </div>
           <input
             class="range"
             type="range"
             min="0"
-            :max="knownBarMax"
+            :max="knownMax"
             step="1"
             :disabled="knownBarDisabled"
-            v-model.number="knownBar"
+            v-model.number="knownCount"
             @change="commitSettings"
           />
           <div class="muted" style="font-size: 12px; margin-top: 4px">
-            {{ knownBar }}% = 本次 {{ knownIncluded }} 題
-            <span v-if="knownBarDisabled">(尚未標記任何題目)</span>
-            <span v-else-if="knownBar === 0">· 0% = 這次完全略過</span>
-            <span v-else-if="knownBarMax < 100">· 上限 {{ knownBarMax }}%</span>
+            <span v-if="knownBarDisabled">尚未標記任何題目</span>
+            <span v-else-if="knownCount === 0">0 題 = 這次完全略過</span>
+            <span v-else-if="knownLimitedByPool">最多 {{ knownMax }} 題(標記的就這麼多)</span>
+            <span v-else>最多 {{ knownMax }} 題(受考卷題數限制)</span>
           </div>
         </div>
 
-        <p v-if="atCapacity" class="cap-warning">
-          錯題 {{ errorBar }}% + 我會了 {{ knownBar }}% 已佔滿整份考卷,
-          本次 {{ examSize }} 題不會有新題目。
+        <p class="muted" style="font-size: 13px; margin-top: 12px" :class="{ 'cap-warning': atCapacity }">
+          本次組成:{{ errorCount }} 題錯題 + {{ knownCount }} 題複習 +
+          <strong>{{ freshCount }} 題新題</strong>
+          <span v-if="atCapacity">(已佔滿,不會有新題目)</span>
         </p>
       </div>
 
