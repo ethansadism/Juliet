@@ -38,32 +38,67 @@ const hasActive = computed(() => !!progress.activeExam)
 const hasHistory = computed(() => progress.exams.length > 0)
 
 const wrongPoolSize = computed(() => progress.wrongQuestionIds.length)
-const errorBar = ref(progress.settings.errorBarPercent)
+const knownPoolSize = computed(() => progress.knownQuestionIds.length)
 const questionsPerExam = ref(progress.settings.questionsPerExam)
-const skipKnown = ref(progress.settings.skipKnown)
+const errorBar = ref(progress.settings.errorBarPercent)
+const knownBar = ref(progress.settings.knownBarPercent)
 
 watch(
   () => progress.settings,
   (s) => {
-    errorBar.value = s.errorBarPercent
     questionsPerExam.value = s.questionsPerExam
-    skipKnown.value = s.skipKnown
+    errorBar.value = s.errorBarPercent
+    knownBar.value = s.knownBarPercent
   },
   { deep: true },
 )
 
+const examSize = computed(() => Math.max(1, Number(questionsPerExam.value) || 1))
 const errorIncluded = computed(() =>
   Math.round((errorBar.value / 100) * wrongPoolSize.value),
+)
+const knownIncluded = computed(() =>
+  Math.round((knownBar.value / 100) * knownPoolSize.value),
 )
 const errorBarDisabled = computed(
   () => totalAttempts.value === 0 || wrongPoolSize.value === 0,
 )
+const knownBarDisabled = computed(() => knownPoolSize.value === 0)
+
+// Each slider may only claim the room the other one leaves, so the two
+// forced groups can never together overflow the exam. Capping `max` stops
+// the drag at the boundary rather than silently reallocating afterwards.
+function percentCap(poolSize, taken) {
+  if (!poolSize) return 0
+  const room = Math.max(0, examSize.value - taken)
+  return Math.min(100, Math.floor((room / poolSize) * 100))
+}
+const errorBarMax = computed(() => percentCap(wrongPoolSize.value, knownIncluded.value))
+const knownBarMax = computed(() => percentCap(knownPoolSize.value, errorIncluded.value))
+const atCapacity = computed(
+  () => errorIncluded.value + knownIncluded.value >= examSize.value,
+)
+
+// Lowering the question count (or losing pool entries) can strand a slider
+// above its new cap; pull it back down instead of overfilling the exam.
+watch([errorBarMax, knownBarMax], () => {
+  let changed = false
+  if (errorBar.value > errorBarMax.value) {
+    errorBar.value = errorBarMax.value
+    changed = true
+  }
+  if (knownBar.value > knownBarMax.value) {
+    knownBar.value = knownBarMax.value
+    changed = true
+  }
+  if (changed) commitSettings()
+})
 
 function commitSettings() {
   progress.updateSettings({
     questionsPerExam: Math.max(1, Math.min(total.value || 3664, Number(questionsPerExam.value) || 1)),
-    errorBarPercent: Math.max(0, Math.min(100, Number(errorBar.value) || 0)),
-    skipKnown: !!skipKnown.value,
+    errorBarPercent: Math.min(errorBarMax.value, Number(errorBar.value) || 0),
+    knownBarPercent: Math.min(knownBarMax.value, Number(knownBar.value) || 0),
   })
 }
 
@@ -72,7 +107,15 @@ async function startExam() {
   if (progress.activeExam) await progress.cancelActive()
   const ids = questions.questions.map((q) => q.id)
   if (!ids.length) return
-  progress.startExam(ids)
+  const exam = progress.startExam(ids)
+  // Possible when every remaining question is marked 我會了 and the
+  // review bar is at 0% — starting it would strand the user on a blank
+  // exam screen.
+  if (!exam.questionIds.length) {
+    progress.cancelActive()
+    alert('依目前設定沒有可出的題目。請調高「複習我會了的題目」比例,或取消部分「我會了」標記。')
+    return
+  }
   router.push({ name: 'exam' })
 }
 
@@ -190,7 +233,7 @@ function fmt2(n) {
             class="range"
             type="range"
             min="0"
-            max="100"
+            :max="errorBarMax"
             step="1"
             :disabled="errorBarDisabled"
             v-model.number="errorBar"
@@ -199,21 +242,39 @@ function fmt2(n) {
           <div class="muted" style="font-size: 12px; margin-top: 4px">
             {{ errorBar }}%
             <span v-if="errorBarDisabled">(尚無錯題,無法使用)</span>
+            <span v-else-if="errorBarMax < 100">· 上限 {{ errorBarMax }}%</span>
           </div>
         </div>
 
-        <div class="row">
-          <label for="skip">略過已標記「我會了」的題目</label>
-          <label class="switch">
-            <input
-              id="skip"
-              type="checkbox"
-              v-model="skipKnown"
-              @change="commitSettings"
-            />
-            <span class="slider" />
-          </label>
+        <div class="row" style="flex-direction: column; align-items: stretch">
+          <div class="row" style="margin-top: 0">
+            <label>複習「我會了」的題目</label>
+            <span class="muted">
+              {{ knownIncluded }} / {{ knownPoolSize }}
+            </span>
+          </div>
+          <input
+            class="range"
+            type="range"
+            min="0"
+            :max="knownBarMax"
+            step="1"
+            :disabled="knownBarDisabled"
+            v-model.number="knownBar"
+            @change="commitSettings"
+          />
+          <div class="muted" style="font-size: 12px; margin-top: 4px">
+            {{ knownBar }}%
+            <span v-if="knownBarDisabled">(尚未標記任何題目)</span>
+            <span v-else-if="knownBar === 0">· 0% = 這次完全略過</span>
+            <span v-else-if="knownBarMax < 100">· 上限 {{ knownBarMax }}%</span>
+          </div>
         </div>
+
+        <p v-if="atCapacity" class="cap-warning">
+          錯題 {{ errorIncluded }} + 我會了 {{ knownIncluded }} 題已佔滿本次
+          {{ examSize }} 題。要再增加請先提高題數,或降低另一項。
+        </p>
       </div>
 
       <p class="muted" style="text-align: center; font-size: 12px">

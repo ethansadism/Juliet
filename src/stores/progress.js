@@ -3,13 +3,32 @@ import { isCorrect } from '../lib/parseQuestion.js'
 import { useAuthStore } from './auth.js'
 import { syncEnabled, syncProgress, pushExam, pullAll, withSync } from '../lib/sync.js'
 
-const VERSION = 2
+const VERSION = 3
 
 const defaultSettings = () => ({
   questionsPerExam: 250,
   errorBarPercent: 0,
-  skipKnown: false,
+  knownBarPercent: 0,
 })
+
+function clampPercent(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  return Math.max(0, Math.min(100, Math.round(n)))
+}
+
+function normalizeSettings(raw) {
+  const s = { ...defaultSettings(), ...(raw || {}) }
+  // v2 → v3: the "略過我會了" switch became the 0% end of knownBarPercent.
+  // Both switch positions map to 0 — a question marked 我會了 now only
+  // re-enters an exam when the user asks for it with the bar.
+  delete s.skipKnown
+  const n = Math.round(Number(s.questionsPerExam))
+  s.questionsPerExam = Number.isFinite(n) && n > 0 ? n : 250
+  s.errorBarPercent = clampPercent(s.errorBarPercent)
+  s.knownBarPercent = clampPercent(s.knownBarPercent)
+  return s
+}
 
 const emptyState = () => ({
   version: VERSION,
@@ -91,16 +110,21 @@ function deriveStats(exams) {
   return stats
 }
 
-function migrateLocalV1(data) {
+function migrateLocal(data) {
   // v1 had questionStats[qid].knownByUser; flatten into a knownIds list.
-  if (data.version === VERSION) return data
   const knownIds = Array.isArray(data.knownIds) ? data.knownIds.slice() : []
   if (data.questionStats) {
     for (const [qid, s] of Object.entries(data.questionStats)) {
       if (s && s.knownByUser && !knownIds.includes(qid)) knownIds.push(qid)
     }
   }
-  return { ...data, version: VERSION, knownIds }
+  // v2 had settings.skipKnown; normalizeSettings folds it away.
+  return {
+    ...data,
+    version: VERSION,
+    knownIds,
+    settings: normalizeSettings(data.settings),
+  }
 }
 
 function unionExamsById(localExams, remoteExams) {
@@ -230,7 +254,7 @@ export const useProgressStore = defineStore('progress', {
         Object.assign(this, emptyState())
         return
       }
-      data = migrateLocalV1(data)
+      data = migrateLocal(data)
       const next = { ...emptyState(), ...data }
       next.exams = Array.isArray(next.exams) ? next.exams : []
       next.knownIds = Array.isArray(next.knownIds) ? next.knownIds : []
@@ -264,7 +288,7 @@ export const useProgressStore = defineStore('progress', {
           remoteProgress.lastActivityAt > this.lastActivityAt
         ) {
           next = {
-            settings: { ...defaultSettings(), ...(remoteProgress.settings || {}) },
+            settings: normalizeSettings(remoteProgress.settings),
             knownIds: Array.isArray(remoteProgress.knownIds) ? remoteProgress.knownIds : [],
             activeExam: remoteProgress.activeExam || null,
             lastActivityAt: remoteProgress.lastActivityAt,
@@ -311,7 +335,7 @@ export const useProgressStore = defineStore('progress', {
       return true
     },
     updateSettings(partial) {
-      this.settings = { ...this.settings, ...partial }
+      this.settings = normalizeSettings({ ...this.settings, ...partial })
       this._persist()
     },
 
@@ -319,23 +343,40 @@ export const useProgressStore = defineStore('progress', {
     startExam(allQuestionIds) {
       const settings = this.settings
       const knownSet = new Set(this.knownIds)
-      let pool = allQuestionIds
-      if (settings.skipKnown) pool = pool.filter((id) => !knownSet.has(id))
 
-      const wrongPool = pool.filter((id) => {
+      // Three disjoint pools. A question marked 我會了 only ever enters an
+      // exam through knownBarPercent — at 0% it is skipped entirely, which
+      // is what the old skipKnown switch did when it was on.
+      const knownPool = allQuestionIds.filter((id) => knownSet.has(id))
+      const rest = allQuestionIds.filter((id) => !knownSet.has(id))
+      const wrongPool = rest.filter((id) => {
         const s = this.questionStats[id]
-        return s && s.timesWrong > 0 && !knownSet.has(id)
+        return s && s.timesWrong > 0
       })
       const wrongSet = new Set(wrongPool)
-      const freshPool = pool.filter((id) => !wrongSet.has(id))
+      const freshPool = rest.filter((id) => !wrongSet.has(id))
 
-      const target = Math.min(settings.questionsPerExam, pool.length)
-      const m = Math.min(
-        wrongPool.length,
-        Math.round((settings.errorBarPercent / 100) * wrongPool.length),
+      const quota = (pct, pool) =>
+        Math.min(pool.length, Math.round((pct / 100) * pool.length))
+      let wrongPicks = pickRandom(wrongPool, quota(settings.errorBarPercent, wrongPool))
+      let knownPicks = pickRandom(knownPool, quota(settings.knownBarPercent, knownPool))
+
+      const target = Math.min(
+        settings.questionsPerExam,
+        rest.length + knownPicks.length,
       )
-      const wrongPicks = pickRandom(wrongPool, m)
-      const remaining = Math.max(0, target - wrongPicks.length)
+      // The settings screen caps both sliders so their quotas fit inside the
+      // exam, but settings can also arrive from another device or predate a
+      // pool that has since shrunk. Trim proportionally instead of
+      // overflowing the requested question count.
+      const forced = wrongPicks.length + knownPicks.length
+      if (forced > target) {
+        const keepWrong = Math.round((wrongPicks.length / forced) * target)
+        wrongPicks = wrongPicks.slice(0, keepWrong)
+        knownPicks = knownPicks.slice(0, target - wrongPicks.length)
+      }
+
+      const remaining = Math.max(0, target - wrongPicks.length - knownPicks.length)
       let freshPicks = pickByLeastSeen(freshPool, this.questionStats, remaining)
       if (freshPicks.length < remaining) {
         const used = new Set(wrongPicks)
@@ -345,7 +386,7 @@ export const useProgressStore = defineStore('progress', {
         )
         freshPicks = freshPicks.concat(extra)
       }
-      const order = shuffle([...wrongPicks, ...freshPicks])
+      const order = shuffle([...wrongPicks, ...knownPicks, ...freshPicks])
 
       const exam = {
         id: `exam-${Date.now()}`,
