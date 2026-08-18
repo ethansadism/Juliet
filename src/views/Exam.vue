@@ -15,6 +15,8 @@ let timer = null
 onMounted(async () => {
   progress.hydrate()
   await questions.load()
+  // An exam left in progress across the id change still holds old ids.
+  await progress.applyLegacyMap(questions.legacyMap)
   if (!progress.activeExam) {
     router.replace({ name: 'home' })
     return
