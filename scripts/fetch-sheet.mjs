@@ -205,11 +205,19 @@ async function main() {
   console.log(`Using ${sheets.length} worksheet(s)`)
 
   const questions = []
+  // `serial` is the pre-2026-08 id scheme: one counter shared by every
+  // worksheet. It made an id a position in the whole workbook, so adding a
+  // row to any but the last tab renumbered everything after it — measured
+  // at 67% of the bank — and silently reassigned every user's answer
+  // history to different questions. It is still computed here, purely so
+  // clients can map their existing records onto the new ids.
   let serial = 0
   for (const sheet of sheets) {
     const rows = parseCsv(sheet.csv)
     let started = false
-    for (const row of rows) {
+    let kept = 0
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
       const a = (row[0] ?? '').trim()
       const b = (row[1] ?? '').trim()
       if (!a && !b) continue
@@ -220,14 +228,22 @@ async function main() {
       started = true
       if (!a || !b) continue
       questions.push({
-        id: `s${sheet.gid}-${serial++}`,
+        // Spreadsheet row number within its own tab, so a tab is only
+        // affected by edits to itself, and `s940888275-r1234` can be looked
+        // up by eye. The `r` also keeps new ids from ever colliding with
+        // the old serial-based ones.
+        id: `s${sheet.gid}-r${i + 1}`,
+        legacyId: `s${sheet.gid}-${serial++}`,
         sheet: sheet.name,
         gid: sheet.gid,
         prompt: a,
         answer: b,
       })
+      kept++
     }
-    console.log(`  ${sheet.name} (gid=${sheet.gid}): now ${questions.length} questions total`)
+    console.log(
+      `  ${sheet.name} (gid=${sheet.gid}): ${kept} questions (${questions.length} total)`,
+    )
   }
 
   const outPath = 'public/data/questions.json'

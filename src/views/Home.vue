@@ -13,11 +13,12 @@ const questions = useQuestionsStore()
 
 onMounted(async () => {
   progress.hydrate()
-  // Question load runs concurrently; the overlay only covers the cloud
-  // pull, since blocking input during the JSON download would feel
-  // heavier than necessary.
-  questions.load()
+  // The bank has to be loaded before stored records can be translated off
+  // the old question-id scheme, and the pull has to be translated too.
+  await questions.load()
+  await progress.applyLegacyMap(questions.legacyMap)
   await withSync(() => progress.pullAndMerge())
+  await progress.applyLegacyMap(questions.legacyMap)
 })
 
 const total = computed(() => questions.total || 0)
@@ -181,9 +182,9 @@ function fmt2(n) {
           <div class="stat">
             <div class="stat-label">累計作答</div>
             <div class="stat-value">
-              {{ totalAttempts }} 次
+              {{ totalAttempts }} 題
               <span v-if="repeatCount > 0" class="muted" style="font-size: 13px">
-                (重複 {{ repeatCount }})
+                (含重複 {{ repeatCount }})
               </span>
             </div>
           </div>

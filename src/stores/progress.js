@@ -158,6 +158,31 @@ function migrateLocal(data) {
   }
 }
 
+// --- legacy question-id migration -------------------------------------
+// Ids used to be a position in the whole workbook; they are now a row
+// number within one worksheet. Records written under the old scheme are
+// translated on the way in, so history, the error pool and 我會了 marks
+// all survive the change. `map` is empty once every stored record has
+// been rewritten, at which point this is all a no-op.
+
+function remapExam(ex, map) {
+  if (!ex) return { exam: ex, changed: false }
+  let changed = false
+  const questionIds = (ex.questionIds || []).map((qid) => {
+    const next = map.get(qid)
+    if (next) changed = true
+    return next || qid
+  })
+  const answers = {}
+  for (const [qid, a] of Object.entries(ex.answers || {})) {
+    const next = map.get(qid)
+    if (next) changed = true
+    answers[next || qid] = a
+  }
+  if (!changed) return { exam: ex, changed: false }
+  return { exam: { ...ex, questionIds, answers }, changed: true }
+}
+
 function unionExamsById(localExams, remoteExams) {
   const byId = new Map()
   for (const e of localExams) if (e && e.id) byId.set(e.id, e)
@@ -372,6 +397,42 @@ export const useProgressStore = defineStore('progress', {
         if (!ok) return
         setPendingUploads(missing.length - i - 1)
       }
+    },
+    // Called once the question bank is loaded, and again after each pull,
+    // since remote records may still carry old ids. Rewritten exams are
+    // pushed back so the cloud converges on the new ids instead of every
+    // client translating forever — the translation table is only accurate
+    // while the worksheets' row structure matches the build it came from.
+    async applyLegacyMap(map) {
+      if (!map || map.size === 0) return false
+      const auth = useAuthStore()
+      const migrated = []
+      const exams = this.exams.map((ex) => {
+        const { exam, changed } = remapExam(ex, map)
+        if (changed) migrated.push(exam)
+        return exam
+      })
+      const knownIds = this.knownIds.map((qid) => map.get(qid) || qid)
+      const { exam: activeExam } = remapExam(this.activeExam, map)
+      const knownChanged = knownIds.some((qid, i) => qid !== this.knownIds[i])
+      const activeChanged = activeExam !== this.activeExam
+      if (!migrated.length && !knownChanged && !activeChanged) return false
+
+      this.$patch((state) => {
+        state.exams = exams
+        state.knownIds = knownIds
+        state.activeExam = activeExam
+        state.questionStats = deriveStats(exams)
+      })
+      this._persist() // also pushes the rewritten knownIds / activeExam
+      if (!auth.user) return true
+      setPendingUploads(migrated.length)
+      for (let i = 0; i < migrated.length; i++) {
+        const ok = await pushExam(auth.user.username, migrated[i])
+        if (!ok) break // retried on the next load
+        setPendingUploads(migrated.length - i - 1)
+      }
+      return true
     },
     updateSettings(partial) {
       this.settings = normalizeSettings({ ...this.settings, ...partial })

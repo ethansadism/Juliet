@@ -17,6 +17,16 @@ export const useQuestionsStore = defineStore('questions', {
       for (const q of s.questions) m.set(q.id, q)
       return m
     },
+    // old id -> current id, for records written before ids became
+    // per-worksheet row numbers. Empty once the build stops emitting
+    // legacyId.
+    legacyMap: (s) => {
+      const m = new Map()
+      for (const q of s.questions) {
+        if (q.legacyId && q.legacyId !== q.id) m.set(q.legacyId, q.id)
+      }
+      return m
+    },
   },
   actions: {
     async load() {
@@ -34,6 +44,7 @@ export const useQuestionsStore = defineStore('questions', {
           const parsed = parseQuestion(q.prompt)
           return {
             id: q.id,
+            legacyId: q.legacyId,
             sheet: q.sheet,
             gid: q.gid,
             prompt: parsed.prompt || q.prompt,

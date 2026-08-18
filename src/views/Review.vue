@@ -15,6 +15,9 @@ const hideCorrect = ref(false)
 onMounted(async () => {
   progress.hydrate()
   await questions.load()
+  // Exams taken before ids became per-worksheet row numbers would
+  // otherwise look up nothing and render as blank questions.
+  await progress.applyLegacyMap(questions.legacyMap)
 })
 
 const exam = computed(() => progress.getExam(props.examId))
