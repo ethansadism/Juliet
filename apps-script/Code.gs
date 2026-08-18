@@ -23,7 +23,23 @@
 const USERS_SHEET = '_users';
 const PROGRESS_SHEET = '_progress';
 const EXAMS_SHEET = '_exams';
-const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const TOKEN_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days
+
+// Tokens keep working this long PAST their stated expiry.
+//
+// The frontend never checks a token's expiry — it treats "a token string
+// exists in localStorage" as "logged in" — so an expired token produced a
+// silently broken app: every sync call returned `unauthorized`, sync.js
+// swallowed it into a console.warn, and the user kept practising with
+// their progress landing only in localStorage. That is how one user lost
+// 78 days of cloud sync without any visible symptom.
+//
+// The grace window keeps already-issued tokens valid so affected users
+// recover without logging out (logging out is what risks their
+// localStorage-only history). Signatures are still verified, so this only
+// extends lifetime — it does not weaken authentication. Shorten it once
+// the frontend detects expiry and prompts for re-login.
+const TOKEN_GRACE_MS = 365 * 24 * 60 * 60 * 1000; // 365 days
 
 const EXAMS_HEADERS = [
   'username', 'examId', 'startedAt', 'finishedAt',
@@ -474,7 +490,7 @@ function verifyToken_(token) {
   const [username, role, expStr, sig] = parts;
   const expected = hmacHex_(`${username}|${role}|${expStr}`, scriptSecret_());
   if (sig !== expected) return null;
-  if (Number(expStr) < Date.now()) return null;
+  if (Number(expStr) + TOKEN_GRACE_MS < Date.now()) return null;
   return { username, role };
 }
 
