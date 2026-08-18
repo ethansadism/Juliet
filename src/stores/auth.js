@@ -46,6 +46,9 @@ export const useAuthStore = defineStore('auth', {
       this.user = null
       setToken(null)
       localStorage.removeItem(USER_KEY)
+      // Progress under `juliet:progress:<username>` is deliberately left
+      // alone: for anyone whose sync has been failing it is the only copy
+      // of their history, and it is re-merged on the next login.
     },
   },
 })

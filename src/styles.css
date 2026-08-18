@@ -415,6 +415,42 @@ a {
   font-size: 18px;
 }
 
+.sync-banner {
+  position: sticky;
+  top: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  padding-top: max(10px, env(safe-area-inset-top));
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.sync-banner.severe {
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--bad);
+  border-bottom-color: rgba(248, 113, 113, 0.4);
+}
+
+.banner-btn {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .sync-overlay {
   position: fixed;
   inset: 0;
