@@ -10,30 +10,54 @@ import {
   setPendingUploads,
 } from '../lib/sync.js'
 
-const VERSION = 3
+const VERSION = 4
 
 const defaultSettings = () => ({
   questionsPerExam: 250,
-  errorBarPercent: 0,
-  knownBarPercent: 0,
+  errorCount: 0, // forced wrong-answer questions, as a count
+  knownCount: 0, // forced "我會了" review questions, as a count
 })
 
-function clampPercent(v) {
-  const n = Number(v)
+function clampCount(v, max) {
+  const n = Math.round(Number(v))
   if (!Number.isFinite(n)) return 0
-  return Math.max(0, Math.min(100, Math.round(n)))
+  return Math.max(0, Math.min(max, n))
+}
+
+function pctToCount(pct, examSize) {
+  const n = Number(pct)
+  if (!Number.isFinite(n)) return 0
+  return Math.round((Math.max(0, Math.min(100, n)) / 100) * examSize)
 }
 
 function normalizeSettings(raw) {
   const s = { ...defaultSettings(), ...(raw || {}) }
-  // v2 → v3: the "略過我會了" switch became the 0% end of knownBarPercent.
-  // Both switch positions map to 0 — a question marked 我會了 now only
-  // re-enters an exam when the user asks for it with the bar.
-  delete s.skipKnown
   const n = Math.round(Number(s.questionsPerExam))
   s.questionsPerExam = Number.isFinite(n) && n > 0 ? n : 250
-  s.errorBarPercent = clampPercent(s.errorBarPercent)
-  s.knownBarPercent = clampPercent(s.knownBarPercent)
+
+  // v2 → v3: the "略過我會了" switch became a bar; both switch positions
+  // map to zero, since a question marked 我會了 now only re-enters an exam
+  // when explicitly asked for.
+  // v3 → v4: the bars hold a question count instead of a percentage. A
+  // percentage could not address single questions in a small exam — 17%
+  // and 20% of a 5-question exam are both "1 question", so dragging did
+  // nothing until it suddenly jumped.
+  if (raw && raw.errorCount === undefined && raw.errorBarPercent !== undefined) {
+    s.errorCount = pctToCount(raw.errorBarPercent, s.questionsPerExam)
+  }
+  if (raw && raw.knownCount === undefined && raw.knownBarPercent !== undefined) {
+    s.knownCount = pctToCount(raw.knownBarPercent, s.questionsPerExam)
+  }
+  delete s.skipKnown
+  delete s.errorBarPercent
+  delete s.knownBarPercent
+
+  s.errorCount = clampCount(s.errorCount, s.questionsPerExam)
+  s.knownCount = clampCount(s.knownCount, s.questionsPerExam)
+  // The two forced groups share one exam, so they cannot outgrow it.
+  if (s.errorCount + s.knownCount > s.questionsPerExam) {
+    s.knownCount = Math.max(0, s.questionsPerExam - s.errorCount)
+  }
   return s
 }
 
@@ -360,7 +384,7 @@ export const useProgressStore = defineStore('progress', {
       const knownSet = new Set(this.knownIds)
 
       // Three disjoint pools. A question marked 我會了 only ever enters an
-      // exam through knownBarPercent — at 0% it is skipped entirely, which
+      // exam through knownCount — at 0 it is skipped entirely, which
       // is what the old skipKnown switch did when it was on.
       const knownPool = allQuestionIds.filter((id) => knownSet.has(id))
       const rest = allQuestionIds.filter((id) => !knownSet.has(id))
@@ -371,15 +395,13 @@ export const useProgressStore = defineStore('progress', {
       const wrongSet = new Set(wrongPool)
       const freshPool = rest.filter((id) => !wrongSet.has(id))
 
-      // Both bars are a share of THIS exam, not of their own pool. Sharing
-      // out the pool made the numbers swing wildly as the pools grew: at a
-      // 335-question error pool, "21%" meant 70 questions — more than three
-      // times a 20-question exam.
+      // Both quotas are plain question counts. Expressing them as a share
+      // of their own pool made the numbers swing wildly as the pools grew:
+      // against a 335-question error pool, "21%" meant 70 questions — more
+      // than three times a 20-question exam.
       const nominal = settings.questionsPerExam
-      const quota = (pct, pool) =>
-        Math.min(pool.length, Math.round((pct / 100) * nominal))
-      let wrongPicks = pickRandom(wrongPool, quota(settings.errorBarPercent, wrongPool))
-      let knownPicks = pickRandom(knownPool, quota(settings.knownBarPercent, knownPool))
+      let wrongPicks = pickRandom(wrongPool, Math.min(wrongPool.length, settings.errorCount))
+      let knownPicks = pickRandom(knownPool, Math.min(knownPool.length, settings.knownCount))
 
       const target = Math.min(nominal, rest.length + knownPicks.length)
       // The settings screen caps both sliders so their quotas fit inside the
