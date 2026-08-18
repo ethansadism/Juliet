@@ -373,6 +373,13 @@ a {
   color: var(--warn);
 }
 
+.cap-warning {
+  color: var(--bad);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 12px 0 0;
+}
+
 .error {
   color: var(--bad);
   background: rgba(248, 113, 113, 0.1);

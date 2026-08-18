@@ -94,6 +94,27 @@ These are bugs we already hit and fixed; preserve the fixes:
 - Take the longest A,B,C,... sequence so a stray `(A)` in the prompt
   body doesn't break splitting.
 
+### Question selection (took two iterations to get right)
+- Split the bank into **three disjoint pools**: `known` (user marked
+  "I know this"), `wrong` (has a wrong attempt, not known), and `fresh`
+  (everything else). Each forced group gets a percentage slider over
+  *its own pool*; the remainder is filled from `fresh`.
+- Fill `fresh` **stratified by times-answered ascending**, not uniformly
+  at random. Uniform sampling lets already-seen questions crowd out
+  never-seen ones long before coverage reaches 100%, which users notice
+  and complain about.
+- Prefer **one slider over a slider + a boolean switch** for the same
+  concept: 0% naturally means "skip these entirely", so a separate
+  "skip known questions" toggle is redundant and the two can contradict
+  each other.
+- Cap each slider's `max` from the other's current draw so the forced
+  groups can never overflow the requested exam size — clamping at drag
+  time is far less confusing than silently reallocating afterwards.
+  Keep a proportional trim in the store anyway: settings sync from other
+  devices and pools shrink.
+- Guard the empty-exam case (everything known + 0% review) or the user
+  lands on a blank exam screen with no way back.
+
 ### Auth model (Apps Script)
 - Passwords: SHA-256(salt + password), salt = `Utilities.getUuid()`.
 - Sessions: stateless HMAC over `username|role|expiresAt`, key in
