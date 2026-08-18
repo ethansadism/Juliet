@@ -155,8 +155,8 @@ function handlePutProgress_(body) {
   if (snap && (Array.isArray(snap.exams) || snap.questionStats)) {
     snap = migrateLegacySnapshot_(target, snap);
   }
-  writeProgressRow_(target, snap);
-  return { ok: true, updatedAt: new Date().toISOString() };
+  withLock_(function () { writeProgressRow_(target, snap); });
+  return withFreshToken_(session, { ok: true, updatedAt: new Date().toISOString() });
 }
 
 function handlePutExam_(body) {
@@ -167,10 +167,10 @@ function handlePutExam_(body) {
   }
   const exam = body.exam;
   if (!exam || !exam.id) return { error: 'missing exam' };
-  upsertExam_(target, exam);
+  withLock_(function () { upsertExam_(target, exam); });
   // Fire-and-forget: queue a debounced backup for ~60s from now.
   scheduleOneShotBackup_();
-  return { ok: true };
+  return withFreshToken_(session, { ok: true });
 }
 
 function handleGetProgress_(params) {
@@ -188,10 +188,10 @@ function handleGetAll_(params) {
   if (target !== session.username && session.role !== 'admin') {
     return { error: 'forbidden' };
   }
-  return {
+  return withFreshToken_(session, {
     progress: readProgress_(target),
     exams: readExams_(target),
-  };
+  });
 }
 
 // =====================================================================
@@ -494,6 +494,33 @@ function verifyToken_(token) {
   return { username, role };
 }
 
+// Every authenticated response carries a fresh token, so an account in
+// regular use never lapses. Only a genuinely idle account reaches the
+// expiry check, and that one gets told to log in again.
+function withFreshToken_(session, result) {
+  if (result && !result.error) {
+    result.token = makeToken_(session.username, session.role);
+  }
+  return result;
+}
+
+// Serialises writes to the shared sheets. A recovery run replays every
+// exam a client has queued, and two of those interleaving on one sheet
+// is how you get duplicated or dropped rows.
+function withLock_(fn) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (err) {
+    throw new Error('busy, try again');
+  }
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function requireSession_(body) {
   const session = verifyToken_(body && body.token);
   if (!session) throw new Error('unauthorized');
@@ -522,7 +549,10 @@ function json_(obj) {
 // 24h whose name starts with "Juliet backup " is moved to trash.
 
 const BACKUP_FOLDER_NAME = 'Juliet Backups';
+// 24h of backups is no use against a fault that stayed invisible for 78
+// days. Hourly copies are kept for a day, then one per day for a month.
 const BACKUP_RETENTION_MS = 24 * 60 * 60 * 1000;
+const BACKUP_DAILY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const ONESHOT_HANDLER = 'runOneShotBackup';
 const HOURLY_HANDLER = 'runHourlyBackup';
 
@@ -586,11 +616,27 @@ function backupsFolder_() {
 }
 
 function pruneOldBackups_(folder) {
-  const cutoff = Date.now() - BACKUP_RETENTION_MS;
+  const now = Date.now();
+  const hourlyCutoff = now - BACKUP_RETENTION_MS;
+  const dailyCutoff = now - BACKUP_DAILY_RETENTION_MS;
+  // Past the hourly window keep the first backup of each day, so a month
+  // of daily restore points survives without unbounded growth.
+  const keptDays = {};
   const files = folder.getFiles();
+  const older = [];
   while (files.hasNext()) {
     const f = files.next();
-    if (!f.getName().startsWith('Juliet backup ')) continue;
-    if (f.getDateCreated().getTime() < cutoff) f.setTrashed(true);
+    if (f.getName().indexOf('Juliet backup ') !== 0) continue;
+    const t = f.getDateCreated().getTime();
+    if (t >= hourlyCutoff) continue; // inside the hourly window
+    if (t < dailyCutoff) { f.setTrashed(true); continue; }
+    older.push({ file: f, t: t });
+  }
+  older.sort(function (a, b) { return a.t - b.t; });
+  for (var i = 0; i < older.length; i++) {
+    const day = Utilities.formatDate(
+      new Date(older[i].t), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    if (keptDays[day]) older[i].file.setTrashed(true);
+    else keptDays[day] = true;
   }
 }

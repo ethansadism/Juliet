@@ -26,6 +26,12 @@ const coverPercent = computed(() => {
   if (!total.value) return 0
   return (totalAttempts.value / total.value) * 100
 })
+// Distinct coverage next to total attempts makes the repeat rate visible:
+// the gap between the two numbers is exactly how much has been re-served.
+const distinctSeen = computed(() => progress.answeredQuestionCount)
+const distinctPercent = computed(() =>
+  total.value ? (distinctSeen.value / total.value) * 100 : 0,
+)
 const correctRate = computed(() => progress.correctRate * 100)
 const avg100 = computed(() => progress.avgSecondsPer100)
 const lastActivity = computed(() => {
@@ -54,30 +60,26 @@ watch(
 )
 
 const examSize = computed(() => Math.max(1, Number(questionsPerExam.value) || 1))
+// Each bar is a share of this exam, so the count is predictable no matter
+// how big the pool behind it grows. (It used to be a share of the pool,
+// which meant 21% could quietly mean "every question in the exam".)
 const errorIncluded = computed(() =>
-  Math.round((errorBar.value / 100) * wrongPoolSize.value),
+  Math.min(wrongPoolSize.value, Math.round((errorBar.value / 100) * examSize.value)),
 )
 const knownIncluded = computed(() =>
-  Math.round((knownBar.value / 100) * knownPoolSize.value),
+  Math.min(knownPoolSize.value, Math.round((knownBar.value / 100) * examSize.value)),
 )
 const errorBarDisabled = computed(
   () => totalAttempts.value === 0 || wrongPoolSize.value === 0,
 )
 const knownBarDisabled = computed(() => knownPoolSize.value === 0)
 
-// Each slider may only claim the room the other one leaves, so the two
-// forced groups can never together overflow the exam. Capping `max` stops
-// the drag at the boundary rather than silently reallocating afterwards.
-function percentCap(poolSize, taken) {
-  if (!poolSize) return 0
-  const room = Math.max(0, examSize.value - taken)
-  return Math.min(100, Math.floor((room / poolSize) * 100))
-}
-const errorBarMax = computed(() => percentCap(wrongPoolSize.value, knownIncluded.value))
-const knownBarMax = computed(() => percentCap(knownPoolSize.value, errorIncluded.value))
-const atCapacity = computed(
-  () => errorIncluded.value + knownIncluded.value >= examSize.value,
-)
+// Both bars measure the same exam, so together they simply may not exceed
+// 100%. Capping `max` stops the drag at the boundary rather than silently
+// reallocating afterwards.
+const errorBarMax = computed(() => (errorBarDisabled.value ? 0 : 100 - knownBar.value))
+const knownBarMax = computed(() => (knownBarDisabled.value ? 0 : 100 - errorBar.value))
+const atCapacity = computed(() => errorBar.value + knownBar.value >= 100)
 
 // Lowering the question count (or losing pool entries) can strand a slider
 // above its new cap; pull it back down instead of overfilling the exam.
@@ -175,6 +177,15 @@ function fmt2(n) {
             </div>
           </div>
           <div class="stat">
+            <div class="stat-label">不重複涵蓋</div>
+            <div class="stat-value">
+              {{ distinctSeen }}/{{ total }}
+              <span class="muted" style="font-size: 13px">
+                ({{ fmt2(distinctPercent) }}%)
+              </span>
+            </div>
+          </div>
+          <div class="stat">
             <div class="stat-label">正確率</div>
             <div class="stat-value">{{ fmt2(correctRate) }}%</div>
           </div>
@@ -240,7 +251,7 @@ function fmt2(n) {
             @change="commitSettings"
           />
           <div class="muted" style="font-size: 12px; margin-top: 4px">
-            {{ errorBar }}%
+            {{ errorBar }}% = 本次 {{ errorIncluded }} 題
             <span v-if="errorBarDisabled">(尚無錯題,無法使用)</span>
             <span v-else-if="errorBarMax < 100">· 上限 {{ errorBarMax }}%</span>
           </div>
@@ -264,7 +275,7 @@ function fmt2(n) {
             @change="commitSettings"
           />
           <div class="muted" style="font-size: 12px; margin-top: 4px">
-            {{ knownBar }}%
+            {{ knownBar }}% = 本次 {{ knownIncluded }} 題
             <span v-if="knownBarDisabled">(尚未標記任何題目)</span>
             <span v-else-if="knownBar === 0">· 0% = 這次完全略過</span>
             <span v-else-if="knownBarMax < 100">· 上限 {{ knownBarMax }}%</span>
@@ -272,8 +283,8 @@ function fmt2(n) {
         </div>
 
         <p v-if="atCapacity" class="cap-warning">
-          錯題 {{ errorIncluded }} + 我會了 {{ knownIncluded }} 題已佔滿本次
-          {{ examSize }} 題。要再增加請先提高題數,或降低另一項。
+          錯題 {{ errorBar }}% + 我會了 {{ knownBar }}% 已佔滿整份考卷,
+          本次 {{ examSize }} 題不會有新題目。
         </p>
       </div>
 

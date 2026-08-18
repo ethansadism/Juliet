@@ -34,6 +34,10 @@ async function post(op, body = {}) {
     err.code = data.error
     throw err
   }
+  // The backend re-issues a token on every authenticated call, so an
+  // account in daily use never lapses. (An expired session used to fail
+  // silently for months.)
+  if (data.token) setToken(data.token)
   return data
 }
 
@@ -49,6 +53,10 @@ async function get(op, params = {}) {
     err.code = data.error
     throw err
   }
+  // The backend re-issues a token on every authenticated call, so an
+  // account in daily use never lapses. (An expired session used to fail
+  // silently for months.)
+  if (data.token) setToken(data.token)
   return data
 }
 

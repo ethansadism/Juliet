@@ -1,7 +1,14 @@
 import { defineStore } from 'pinia'
 import { isCorrect } from '../lib/parseQuestion.js'
 import { useAuthStore } from './auth.js'
-import { syncEnabled, syncProgress, pushExam, pullAll, withSync } from '../lib/sync.js'
+import {
+  syncEnabled,
+  syncProgress,
+  pushExam,
+  pullAll,
+  withSync,
+  setPendingUploads,
+} from '../lib/sync.js'
 
 const VERSION = 3
 
@@ -182,11 +189,15 @@ export const useProgressStore = defineStore('progress', {
     knownSet(state) {
       return new Set(state.knownIds)
     },
+    // Questions still owed a correction: wrong on the most recent attempt.
+    // Using "ever wrong" instead made this set grow without bound — one
+    // user reached 335 entries, so even a 6% error-bar filled their whole
+    // exam with repeats.
     wrongQuestionIds(state) {
       const known = new Set(state.knownIds)
       const out = []
       for (const [qid, s] of Object.entries(state.questionStats)) {
-        if (s.timesWrong > 0 && !known.has(qid)) out.push(qid)
+        if (s.lastWrong && !known.has(qid)) out.push(qid)
       }
       return out
     },
@@ -298,14 +309,7 @@ export const useProgressStore = defineStore('progress', {
       }
 
       if (!examsChanged && !progressChanged) {
-        // Still push any local-only finished exams so an earlier offline
-        // submit catches up.
-        const remoteIds = new Set(remoteExams.map((e) => e.id))
-        for (const ex of this.exams) {
-          if (ex.finishedAt && !remoteIds.has(ex.id)) {
-            pushExam(auth.user.username, ex)
-          }
-        }
+        await this._pushMissingExams(auth.user.username, remoteExams)
         return false
       }
 
@@ -325,14 +329,25 @@ export const useProgressStore = defineStore('progress', {
       } catch (err) {
         console.warn('localStorage write failed', err)
       }
-      // Push any local-only finished exams (e.g. submitted while offline).
-      const remoteIds = new Set(remoteExams.map((e) => e.id))
-      for (const ex of this.exams) {
-        if (ex.finishedAt && !remoteIds.has(ex.id)) {
-          pushExam(auth.user.username, ex)
-        }
-      }
+      await this._pushMissingExams(auth.user.username, remoteExams)
       return true
+    },
+    // Replay exams the cloud is missing (submitted while offline, or while
+    // the session was silently unauthorized). Sequential on purpose: one
+    // recovery run replayed 52 exams at once, which is a burst Apps Script
+    // has no reason to absorb and which interleaves writes to one sheet.
+    async _pushMissingExams(username, remoteExams) {
+      const remoteIds = new Set((remoteExams || []).map((e) => e.id))
+      const missing = this.exams.filter((ex) => ex.finishedAt && !remoteIds.has(ex.id))
+      setPendingUploads(missing.length)
+      for (let i = 0; i < missing.length; i++) {
+        const ok = await pushExam(username, missing[i])
+        // Stop on the first failure and leave the remaining count on the
+        // banner; the next pull retries. Pressing on is how 52 queued
+        // exams turn into 52 identical errors.
+        if (!ok) return
+        setPendingUploads(missing.length - i - 1)
+      }
     },
     updateSettings(partial) {
       this.settings = normalizeSettings({ ...this.settings, ...partial })
@@ -351,20 +366,22 @@ export const useProgressStore = defineStore('progress', {
       const rest = allQuestionIds.filter((id) => !knownSet.has(id))
       const wrongPool = rest.filter((id) => {
         const s = this.questionStats[id]
-        return s && s.timesWrong > 0
+        return s && s.lastWrong
       })
       const wrongSet = new Set(wrongPool)
       const freshPool = rest.filter((id) => !wrongSet.has(id))
 
+      // Both bars are a share of THIS exam, not of their own pool. Sharing
+      // out the pool made the numbers swing wildly as the pools grew: at a
+      // 335-question error pool, "21%" meant 70 questions — more than three
+      // times a 20-question exam.
+      const nominal = settings.questionsPerExam
       const quota = (pct, pool) =>
-        Math.min(pool.length, Math.round((pct / 100) * pool.length))
+        Math.min(pool.length, Math.round((pct / 100) * nominal))
       let wrongPicks = pickRandom(wrongPool, quota(settings.errorBarPercent, wrongPool))
       let knownPicks = pickRandom(knownPool, quota(settings.knownBarPercent, knownPool))
 
-      const target = Math.min(
-        settings.questionsPerExam,
-        rest.length + knownPicks.length,
-      )
+      const target = Math.min(nominal, rest.length + knownPicks.length)
       // The settings screen caps both sliders so their quotas fit inside the
       // exam, but settings can also arrive from another device or predate a
       // pool that has since shrunk. Trim proportionally instead of
